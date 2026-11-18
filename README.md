@@ -139,6 +139,11 @@ LiveExtract/
 
 ---
 
-## License
+## License & Commercial Use
 
-MIT License — see [LICENSE](LICENSE) for details.
+LiveExtract is licensed under the **[PolyForm Noncommercial License 1.0.0](LICENSE)** (`PolyForm-Noncommercial-1.0.0`).
+
+* **Free for Noncommercial Use**: You are free to download, use, modify, and share LiveExtract for personal, educational, research, hobby, or other noncommercial projects.
+* **Credit Required**: If you use, redistribute, or build on any part of LiveExtract in another project, you must include the license (or its URL) and preserve the required attribution notice from [NOTICE](NOTICE):
+  > `Required Notice: Copyright (c) 2026 Raunak Kumar — LiveExtract (https://github.com/raunakgit00001/LiveExtract)`
+* **Commercial Licensing**: You may **not** sell, paywall, bundle into a commercial product, or otherwise monetize LiveExtract (in original or modified form) without a separate commercial license. For commercial licensing or revenue-sharing inquiries, please contact the author via [GitHub](https://github.com/raunakgit00001/LiveExtract/issues).

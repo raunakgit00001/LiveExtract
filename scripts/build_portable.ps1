@@ -44,6 +44,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE" }
 
     Write-Host "[3/3] Creating portable ZIP archive..." -ForegroundColor Cyan
+    if (Test-Path "LICENSE") { Copy-Item "LICENSE" (Join-Path $RootDir "dist\LiveExtract\LICENSE") -Force }
+    if (Test-Path "NOTICE")  { Copy-Item "NOTICE"  (Join-Path $RootDir "dist\LiveExtract\NOTICE")  -Force }
     $zipOut = Join-Path $RootDir "dist\LiveExtract-Portable-Windows-x64.zip"
     if (Test-Path $zipOut) { Remove-Item -Force $zipOut }
     Compress-Archive -Path (Join-Path $RootDir "dist\LiveExtract\*") -DestinationPath $zipOut
