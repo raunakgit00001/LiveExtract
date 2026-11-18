@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "liveextract"
+version = "1.0.0"
+description = "Zero-disk streaming archive downloader and extractor for ZIP, ZIP64, RAR4, RAR5, and 7z"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Raunak Kumar"}
+]
+keywords = [
+    "zip", "rar", "7z", "zstd", "streaming", "downloader", "extractor", "http-range", "zero-disk"
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: Developers",
+    "Topic :: System :: Archiving :: Compression",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+dependencies = []
+
+[project.optional-dependencies]
+zstd = ["zstandard>=0.22.0; python_version < '3.14'"]
+build = ["pyinstaller>=6.0.0"]
+
+[project.scripts]
+liveextract = "liveextract.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["liveextract*", "gui*"]

@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+
+# Build & Release Artifacts
+build/
+dist/
+*.spec
+*.dll
+*.so
+*.dylib
+*.exe
+*.zip
+*.rar
+*.7z
+
+# Extracted Outputs & Runtime Journals
+extracted_output/
+LiveExtract_Output/
+.extract_state.json
+*.tmp
+
+# IDE & Editor Configs
+.vscode/
+.idea/
+.clangd
+compile_commands.json
+.cache/
+.DS_Store
+Thumbs.db

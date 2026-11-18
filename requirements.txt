@@ -1,0 +1,7 @@
+# LiveExtract has zero third-party runtime dependencies on Python 3.14+.
+#
+# Optional:
+#   - On Python < 3.14, install `zstandard` for ZIP Method 93 (Zstd) support:
+#       zstandard>=0.22.0
+#   - To build the standalone portable Windows executable:
+#       pyinstaller>=6.0.0
