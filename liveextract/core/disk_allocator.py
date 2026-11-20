@@ -32,21 +32,24 @@ class DiskAllocator:
         Safely resolve relative_path inside self.root_dir.
         Blocks Zip Slip (directory traversal attacks using '../' or absolute paths).
         """
+        # Normalize slashes and strip leading slashes / drive letters
         cleaned = relative_path.replace("\\", "/").lstrip("/")
-
+        
+        # Check for path components that attempt traversal
         parts = Path(cleaned).parts
         if ".." in parts:
             raise PathSecurityError(f"Directory traversal detected in path: {relative_path}")
 
         target_path = (self.root_dir / cleaned).resolve()
-
+        
+        # Verify that target_path is truly within self.root_dir
         try:
             target_path.relative_to(self.root_dir)
         except ValueError:
             raise PathSecurityError(
                 f"Resolved path '{target_path}' escapes target root '{self.root_dir}'"
             )
-
+            
         return target_path
 
     def check_disk_space(self, required_bytes: int, safety_margin: int = 10 * 1024 * 1024) -> Tuple[bool, int, int]:
@@ -66,7 +69,8 @@ class DiskAllocator:
         If skip_if_exists is True and the file already exists with matching size, leaves it intact.
         """
         target_path.parent.mkdir(parents=True, exist_ok=True)
-
+        
+        # If directory entry (size 0 and ends in directory structure)
         if uncompressed_size == 0:
             target_path.touch(exist_ok=True)
             return
@@ -83,13 +87,14 @@ class DiskAllocator:
         verify_space: bool = True,
         safety_margin_bytes: int = 10 * 1024 * 1024,
         skip_if_exists: bool = True,
+        allocate_files: bool = True,
     ) -> Dict[str, Path]:
         """
         Pre-allocate all directories and files defined in a file list / manifest.
         Returns mapping from archive path string to resolved local Path object.
         """
         self.root_dir.mkdir(parents=True, exist_ok=True)
-
+        
         total_required = sum(f.get("uncompressed_size", 0) for f in files)
         if verify_space:
             has_space, free_b, req_b = self.check_disk_space(total_required, safety_margin_bytes)
@@ -102,16 +107,18 @@ class DiskAllocator:
 
         allocated_paths: Dict[str, Path] = {}
 
+        # 1. First create all directory paths
         for entry in files:
             path_str = entry["path"]
             resolved = self.sanitize_path(path_str)
             allocated_paths[path_str] = resolved
-
+            
             if entry.get("is_dir", False) or path_str.endswith("/"):
                 resolved.mkdir(parents=True, exist_ok=True)
             else:
                 resolved.parent.mkdir(parents=True, exist_ok=True)
-                size = entry.get("uncompressed_size", 0)
-                self.pre_allocate_file(resolved, size, skip_if_exists=skip_if_exists)
+                if allocate_files:
+                    size = entry.get("uncompressed_size", 0)
+                    self.pre_allocate_file(resolved, size, skip_if_exists=skip_if_exists)
 
         return allocated_paths
