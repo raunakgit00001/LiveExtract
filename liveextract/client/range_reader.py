@@ -1,6 +1,7 @@
 """
 High-performance HTTP/1.1 Keep-Alive Range Reader and file offset reader.
-Reuses persistent TCP + TLS connections across requests to eliminate repeated TLS handshake stalls.
+Reuses persistent TCP + TLS connections across requests to eliminate repeated TLS handshake stalls,
+optimized for CDN tunnels, signed URLs (presigned S3/tokens), proxies, and cloud storage.
 """
 
 import http.client
@@ -12,13 +13,13 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, Generator, Optional, Tuple
+from typing import Dict, Generator, Optional, Tuple
 
 
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept": "*/*",
-    "Accept-Encoding": "identity",
+    "Accept-Encoding": "identity",  # Prevent proxy from transcoding or gzipping archive byte ranges
     "Connection": "keep-alive",
 }
 
@@ -29,6 +30,12 @@ class RangeReadError(IOError):
 
 
 class RangeReader:
+    """
+    Reads precise byte ranges from remote HTTP/HTTPS endpoints or local files.
+    Uses persistent HTTP/1.1 Keep-Alive connections to saturate internet bandwidth
+    without repeating TCP/TLS handshakes between ranges.
+    """
+
     def __init__(
         self,
         source: str,
@@ -51,10 +58,12 @@ class RangeReader:
         self._effective_url: str = source
         self._suggested_filename: Optional[str] = None
 
+        # Persistent Keep-Alive connection state
         self._conn: Optional[http.client.HTTPConnection] = None
         self._conn_key: Optional[Tuple[str, str, int]] = None
         self._ssl_ctx: Optional[ssl.SSLContext] = None
 
+        # Check if local file or URL
         if source.startswith("file://"):
             clean_path = source[7:]
             if clean_path.startswith("/") and len(clean_path) > 2 and clean_path[2] == ":":
@@ -70,13 +79,16 @@ class RangeReader:
 
     @property
     def suggested_filename(self) -> Optional[str]:
+        """Return filename extracted from Content-Disposition header, if available."""
         return self._suggested_filename
 
     @property
     def effective_url(self) -> str:
+        """The final redirected URL after following initial hops."""
         return self._effective_url
 
     def close(self) -> None:
+        """Close any active persistent HTTP/HTTPS connection."""
         if self._conn is not None:
             try:
                 self._conn.close()
@@ -89,6 +101,7 @@ class RangeReader:
         self.close()
 
     def _get_connection(self, parsed: urllib.parse.ParseResult) -> http.client.HTTPConnection:
+        """Return an active persistent Keep-Alive HTTP/HTTPS connection, creating one if needed."""
         scheme = parsed.scheme.lower()
         host = parsed.hostname or ""
         port = parsed.port or (443 if scheme == "https" else 80)
@@ -106,6 +119,7 @@ class RangeReader:
             conn = http.client.HTTPConnection(host, port, timeout=self.timeout)
 
         conn.connect()
+        # Tune TCP socket for sustained high-throughput downloads
         if conn.sock is not None:
             try:
                 conn.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -124,6 +138,12 @@ class RangeReader:
         extra_headers: Optional[Dict[str, str]] = None,
         max_redirects: int = 5,
     ) -> Tuple[int, Any, Any, str]:
+        """
+        Execute an HTTP request reusing persistent Keep-Alive sockets where possible.
+        Follows 301/302/303/307/308 redirects automatically.
+        Returns: (status, headers, response_stream, final_url)
+        """
+        # If a custom urllib opener was provided (e.g. mock tests), use it
         if self.opener is not None or url.startswith("mock://"):
             req = urllib.request.Request(url, method=method)
             for k, v in self.headers.items():
@@ -147,6 +167,7 @@ class RangeReader:
             if extra_headers:
                 req_headers.update(extra_headers)
 
+            # Try on persistent connection; if stale, reconnect once cleanly
             resp = None
             for conn_try in range(2):
                 conn = self._get_connection(parsed)
@@ -162,6 +183,7 @@ class RangeReader:
             assert resp is not None
             if resp.status in (301, 302, 303, 307, 308):
                 loc = resp.getheader("Location")
+                # Drain redirect body to keep connection reusable
                 try:
                     resp.read()
                 except Exception:
@@ -176,6 +198,7 @@ class RangeReader:
         raise RangeReadError(f"Too many redirects following {url}")
 
     def _extract_filename_from_headers(self, headers) -> Optional[str]:
+        """Extract filename from Content-Disposition header."""
         cd = headers.get("Content-Disposition", "")
         if not cd:
             return None
@@ -191,6 +214,10 @@ class RangeReader:
         return None
 
     def get_total_size(self) -> int:
+        """
+        Query total byte size of the target archive and discover metadata.
+        Uses GET with Range: bytes=0-0 on a persistent socket to support signed URLs.
+        """
         if self._total_size is not None:
             return self._total_size
 
@@ -201,6 +228,7 @@ class RangeReader:
             self._suggested_filename = self.local_path.name
             return self._total_size
 
+        # 1. Primary probe: GET with Range: bytes=0-0
         try:
             status, headers, resp, final_url = self._http_request(
                 self._effective_url, method="GET", extra_headers={"Range": "bytes=0-0"}
@@ -211,12 +239,13 @@ class RangeReader:
             cr = headers.get("Content-Range")
             if status == 206:
                 try:
-                    resp.read()
+                    resp.read()  # Drain the 1 byte cleanly so Keep-Alive socket stays reusable!
                     if self.opener is not None or self._effective_url.startswith("mock://"):
                         resp.close()
                 except Exception:
                     self.close()
             else:
+                # Server ignored Range and started sending full 200 body; close socket cleanly
                 try:
                     resp.close()
                 except Exception:
@@ -236,6 +265,7 @@ class RangeReader:
         except Exception:
             self.close()
 
+        # 2. Fallback probe: HEAD request
         try:
             status, headers, resp, final_url = self._http_request(self._effective_url, method="HEAD")
             try:
@@ -252,19 +282,25 @@ class RangeReader:
         except Exception as err:
             self.close()
             raise RangeReadError(
-                f"Failed to query archive size from {self.source}: {err}"
+                f"Failed to query archive size from {self.source}. "
+                f"Server or proxy may require active authentication or expired signed token: {err}"
             ) from err
 
         raise RangeReadError(f"Server at {self.source} did not provide archive size or byte-range support")
 
     def read_tail(self, tail_size: int) -> Tuple[bytes, int]:
+        """
+        Fetch the last `tail_size` bytes of the archive using explicit positive byte offsets.
+        """
         total = self.get_total_size()
         actual_fetch = min(total, tail_size)
         start_offset = total - actual_fetch
+
         data = self.read_range(start_offset, total - 1)
         return data, total
 
     def read_range(self, start: int, end: int) -> bytes:
+        """Read byte range [start, end] inclusively."""
         if start > end:
             return b""
         chunks = list(self.stream_range(start, end, chunk_size=min(1048576, end - start + 1)))
@@ -276,6 +312,10 @@ class RangeReader:
         end: int,
         chunk_size: int = 262144,
     ) -> Generator[bytes, None, None]:
+        """
+        Stream byte range [start, end] in chunks of `chunk_size` bytes over a persistent Keep-Alive socket.
+        Automatically retries on transient connection drops with exponential backoff.
+        """
         if start > end:
             return
 
@@ -295,42 +335,53 @@ class RangeReader:
         attempt = 0
         current_start = start
 
-        while current_start <= end:
-            attempt += 1
-            try:
-                status, headers, resp, final_url = self._http_request(
-                    self._effective_url,
-                    method="GET",
-                    extra_headers={"Range": f"bytes={current_start}-{end}"},
-                )
-                self._effective_url = final_url
+        try:
+            while current_start <= end:
+                attempt += 1
+                try:
+                    status, headers, resp, final_url = self._http_request(
+                        self._effective_url,
+                        method="GET",
+                        extra_headers={"Range": f"bytes={current_start}-{end}"},
+                    )
+                    self._effective_url = final_url
 
-                if status not in (200, 206):
+                    if status not in (200, 206):
+                        self.close()
+                        raise RangeReadError(f"Unexpected HTTP status: {status}")
+
+                    if status == 200 and current_start > 0:
+                        self.close()
+                        raise RangeReadError(
+                            f"Server returned HTTP 200 instead of HTTP 206 Partial Content for range {current_start}-{end}"
+                        )
+
+                    # Track if server requested connection close
+                    conn_hdr = (headers.get("Connection") or "").lower()
+
+                    while current_start <= end:
+                        read_len = min(chunk_size, end - current_start + 1)
+                        chunk = resp.read(read_len)
+                        if not chunk:
+                            break
+                        current_start += len(chunk)
+                        yield chunk
+
+                    if conn_hdr == "close" or current_start <= end:
+                        self.close()
+                    elif hasattr(resp, "close") and (self.opener is not None or self._effective_url.startswith("mock://")):
+                        resp.close()
+
+                    if current_start > end:
+                        break  # Stream slice completed successfully
+                    raise RangeReadError(f"Premature EOF at byte {current_start}/{end}")
+                except Exception as err:
                     self.close()
-                    raise RangeReadError(f"Unexpected HTTP status: {status}")
-
-                conn_hdr = (headers.get("Connection") or "").lower()
-
-                while current_start <= end:
-                    read_len = min(chunk_size, end - current_start + 1)
-                    chunk = resp.read(read_len)
-                    if not chunk:
-                        break
-                    current_start += len(chunk)
-                    yield chunk
-
-                if conn_hdr == "close" or current_start <= end:
-                    self.close()
-                elif hasattr(resp, "close") and (self.opener is not None or self._effective_url.startswith("mock://")):
-                    resp.close()
-
-                if current_start > end:
-                    break
-                raise RangeReadError(f"Premature EOF at byte {current_start}/{end}")
-            except Exception as err:
+                    if attempt >= self.max_retries:
+                        raise RangeReadError(
+                            f"Failed reading range {start}-{end} from {self.source} after {attempt} attempts: {err}"
+                        ) from err
+                    time.sleep(self.backoff_sec * (2 ** (attempt - 1)))
+        finally:
+            if current_start <= end:
                 self.close()
-                if attempt >= self.max_retries:
-                    raise RangeReadError(
-                        f"Failed reading range {start}-{end} from {self.source} after {attempt} attempts: {err}"
-                    ) from err
-                time.sleep(self.backoff_sec * (2 ** (attempt - 1)))

@@ -1,6 +1,12 @@
 """
 High-throughput streaming archive extraction client.
-Coalesces contiguous files into large Keep-Alive HTTP Range streams to sustain full bandwidth.
+Optimized for maximum network saturation:
+  - Contiguous Range Batch Coalescing (coalesces hundreds of small files into single continuous HTTP streams)
+  - Persistent HTTP/1.1 Keep-Alive TLS sockets per worker (zero repeated TLS handshakes)
+  - Zero-RTT inline Local File Header skipping
+  - Rolling 2-second real-time network & extraction speed telemetry
+  - Full ZIP codec support (STORED, DEFLATE, BZIP2, LZMA, ZSTD/93, XZ, ZIP64) + Zero-Disk RAR4/RAR5/7z
+  - Live Pause/Resume/Cancel with throttled transaction journaling
 """
 
 import collections
@@ -41,6 +47,7 @@ class ExtractionCancelledError(Exception):
 
 @dataclass
 class StreamProgress:
+    """Real-time progress telemetry."""
     current_file: str
     file_index: int
     total_files: int
@@ -48,9 +55,9 @@ class StreamProgress:
     total_uncompressed_bytes: int
     compressed_bytes_streamed: int
     elapsed_seconds: float
-    bytes_per_second: float
+    bytes_per_second: float            # Extraction speed (uncompressed B/s, rolling 2s)
     active_workers: int = 1
-    net_bytes_per_second: float = 0.0
+    net_bytes_per_second: float = 0.0  # Network download speed (compressed B/s, rolling 2s)
 
     @property
     def percent(self) -> float:
@@ -63,7 +70,11 @@ ProgressCallback = Callable[[StreamProgress], None]
 
 
 class _BatchByteCursor:
-    """Streaming byte cursor over a single continuous HTTP Range request."""
+    """
+    Zero-copy-friendly streaming byte cursor over a single continuous HTTP Range request.
+    Allows demuxing dozens or hundreds of contiguous ZIP entries straight out of RAM
+    without reopening sockets or issuing per-file HTTP requests.
+    """
 
     def __init__(
         self,
@@ -90,6 +101,7 @@ class _BatchByteCursor:
             self._buf_idx = 0
             return len(self._buf) > 0
         except StopIteration:
+            # Rare continuation if local extra field exceeded slack estimate
             if self.pos < self.total_archive_size:
                 cont_end = min(self.total_archive_size - 1, self.pos + max(min_needed, self.chunk_size) - 1)
                 self._iter = iter(self.reader.stream_range(self.pos, cont_end, chunk_size=self.chunk_size))
@@ -117,6 +129,7 @@ class _BatchByteCursor:
         if target_offset > self.pos:
             self.skip_bytes(target_offset - self.pos)
         elif target_offset < self.pos:
+            # Should not happen on sorted batches, but handle safely via fresh range
             self.pos = target_offset
             self._buf = b""
             self._buf_idx = 0
@@ -149,12 +162,30 @@ class _BatchByteCursor:
             remaining -= take
             yield chunk
 
+    def close(self) -> None:
+        """Close generator and ensure underlying socket is clean if not fully drained."""
+        if hasattr(self, "_iter") and hasattr(self._iter, "close"):
+            try:
+                self._iter.close()
+            except Exception:
+                pass
+        if self.pos <= self.end_offset:
+            # Slack or interrupted batch: close reader socket so subsequent batch won't read stale bytes
+            self.reader.close()
+        self._buf = b""
+        self._buf_idx = 0
+
 
 class StreamClient:
+    """
+    LiveExtract client engine for on-the-fly streaming extraction.
+    Coalesces contiguous files into large Keep-Alive HTTP Range streams to sustain full bandwidth.
+    """
+
     def __init__(
         self,
-        chunk_size: int = 262144,
-        max_workers: int = 1,
+        chunk_size: int = 262144,  # 256 KB default for high network throughput
+        max_workers: int = 1,      # 1 = sequential, >1 = parallel multi-connection
         timeout: float = 20.0,
         verify_crc: bool = True,
         resume: bool = True,
@@ -174,18 +205,23 @@ class StreamClient:
         entries: List[FileManifestEntry],
         total_archive_size: int,
     ) -> List[Tuple[int, int, List[FileManifestEntry]]]:
+        """
+        Coalesce adjacent ZIP entries into large continuous HTTP Range batches.
+        Eliminates hundreds of tiny HTTP requests and TLS handshakes for small game files.
+        """
         if not entries:
             return []
 
         sorted_entries = sorted(entries, key=lambda e: e.local_header_offset)
         total_comp = sum(e.compressed_size for e in sorted_entries)
 
+        # Target batch size: keep all workers saturated, up to 16 MB per continuous Range request
         if self.max_workers > 1 and total_comp > 0:
             target_batch_bytes = max(2 * 1024 * 1024, min(16 * 1024 * 1024, total_comp // (self.max_workers * 2)))
         else:
             target_batch_bytes = 16 * 1024 * 1024
 
-        max_gap_bytes = 64 * 1024
+        max_gap_bytes = 64 * 1024  # Coalesce if gap between adjacent files <= 64 KB
 
         def _entry_bounds(e: FileManifestEntry) -> Tuple[int, int]:
             if e.raw_data_offset >= 0 and e.raw_data_end > e.raw_data_offset:
@@ -230,13 +266,18 @@ class StreamClient:
         progress_cb: Optional[ProgressCallback] = None,
         effective_url: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """
+        Execute high-speed streaming extraction using Range Batch Coalescing and persistent Keep-Alive sockets.
+        """
         target_path = Path(target_dir).resolve()
         allocator = DiskAllocator(target_path)
         journal = StateJournal(target_path, archive_source) if self.resume else None
 
+        # 1. Pre-allocate disk hierarchy & files
         manifest_dict_list = [f.to_dict() for f in manifest.files]
         allocated_paths = allocator.pre_allocate_manifest(manifest_dict_list, verify_space=True)
 
+        # 2. Filter files to download (skip dirs & already completed files)
         files_to_extract: List[FileManifestEntry] = []
         uncompressed_done = 0
         compressed_streamed = 0
@@ -245,7 +286,7 @@ class StreamClient:
         for entry in manifest.files:
             if entry.is_dir:
                 continue
-            if journal and journal.is_file_completed(entry.path, entry.uncompressed_size):
+            if journal and journal.is_file_completed(entry.path, entry.uncompressed_size, entry.crc32):
                 uncompressed_done += entry.uncompressed_size
                 compressed_streamed += entry.compressed_size
                 processed_files += 1
@@ -257,10 +298,12 @@ class StreamClient:
         progress_lock = threading.Lock()
         stream_target = effective_url or archive_source
 
+        # Rolling 2-second window for true instantaneous speed (like IDM)
         speed_window: Deque[Tuple[float, int, int]] = collections.deque()
         window_comp_sum = 0
         window_uncomp_sum = 0
 
+        # Per-thread persistent Keep-Alive RangeReader pool
         thread_local = threading.local()
         all_readers: List[RangeReader] = []
         readers_lock = threading.Lock()
@@ -286,6 +329,7 @@ class StreamClient:
                 window_comp_sum += comp_delta
                 window_uncomp_sum += uncomp_delta
 
+            # Trim samples older than 2.0 seconds
             cutoff = now - 2.0
             while speed_window and speed_window[0][0] < cutoff:
                 _, old_c, old_u = speed_window.popleft()
@@ -319,6 +363,7 @@ class StreamClient:
             if not self.controller.check_and_wait():
                 return
 
+            # Handle batch containing only 0-byte empty files without making any HTTP request
             if all(e.compressed_size == 0 or e.uncompressed_size == 0 for e in batch_entries):
                 for entry in batch_entries:
                     allocated_paths[entry.path].touch(exist_ok=True)
@@ -338,79 +383,100 @@ class StreamClient:
                 chunk_size=self.chunk_size,
             )
 
-            for entry in batch_entries:
-                if not self.controller.check_and_wait():
+            try:
+                for entry in batch_entries:
+                    if not self.controller.check_and_wait():
+                        if journal:
+                            with progress_lock:
+                                journal.flush_if_dirty()
+                        return
+
+                    local_file = allocated_paths[entry.path]
+                    if entry.compressed_size == 0 or entry.uncompressed_size == 0:
+                        local_file.touch(exist_ok=True)
+                        with progress_lock:
+                            processed_files += 1
+                            if journal:
+                                journal.mark_file_completed(entry.path, entry.crc32, 0)
+                            _record_and_emit(entry.path, 0, 0)
+                        continue
+
                     if journal:
                         with progress_lock:
-                            journal.flush_if_dirty()
-                    return
+                            journal.mark_file_started(entry.path)
 
-                local_file = allocated_paths[entry.path]
-                if entry.compressed_size == 0 or entry.uncompressed_size == 0:
-                    local_file.touch(exist_ok=True)
+                    # Position cursor to exact start of raw compressed bytes
+                    if entry.raw_data_offset >= 0 and entry.raw_data_end > entry.raw_data_offset:
+                        cursor.skip_to(entry.raw_data_offset)
+                    else:
+                        cursor.skip_to(entry.local_header_offset)
+                        hdr30 = cursor.read_exact(LOCAL_HEADER_MIN_SIZE)
+                        fname_len, extra_len = ZipBinaryParser.parse_local_header_prefix(hdr30)
+                        if fname_len + extra_len > 0:
+                            cursor.skip_bytes(fname_len + extra_len)
+
+                    crc_calc = StreamingCRC32()
+                    decompressor = create_decompressor(entry.compression_method)
+
+                    try:
+                        with open(local_file, "wb") as f_out:
+                            for payload_chunk in cursor.stream_n_bytes(entry.compressed_size):
+                                if not self.controller.check_and_wait():
+                                    if journal:
+                                        with progress_lock:
+                                            journal.flush_if_dirty()
+                                    return
+
+                                decompressed = decompressor.decompress_chunk(payload_chunk)
+                                if decompressed:
+                                    crc_calc.update(decompressed)
+                                    f_out.write(decompressed)
+
+                                with progress_lock:
+                                    _record_and_emit(entry.path, len(payload_chunk), len(decompressed) if decompressed else 0)
+
+                            final_bytes = decompressor.flush()
+                            if final_bytes:
+                                crc_calc.update(final_bytes)
+                                f_out.write(final_bytes)
+                                with progress_lock:
+                                    _record_and_emit(entry.path, 0, len(final_bytes))
+                    except Exception as stream_err:
+                        try:
+                            if local_file.exists():
+                                local_file.unlink()
+                        except Exception:
+                            pass
+                        if journal:
+                            with progress_lock:
+                                journal.mark_file_failed(entry.path, str(stream_err))
+                        raise
+
+                    if self.verify_crc and entry.crc32:
+                        if not crc_calc.verify(entry.crc32):
+                            err_msg = (
+                                f"CRC32 mismatch for '{entry.path}': "
+                                f"computed {crc_calc.hexdigest()} != expected {entry.crc32}"
+                            )
+                            try:
+                                if local_file.exists():
+                                    local_file.unlink()
+                            except Exception:
+                                pass
+                            if journal:
+                                with progress_lock:
+                                    journal.mark_file_failed(entry.path, err_msg)
+                            raise IntegrityError(err_msg)
+
                     with progress_lock:
                         processed_files += 1
                         if journal:
-                            journal.mark_file_completed(entry.path, entry.crc32, 0)
+                            journal.mark_file_completed(entry.path, entry.crc32 or crc_calc.hexdigest(), entry.uncompressed_size)
                         _record_and_emit(entry.path, 0, 0)
-                    continue
+            finally:
+                cursor.close()
 
-                if journal:
-                    with progress_lock:
-                        journal.mark_file_started(entry.path)
-
-                if entry.raw_data_offset >= 0 and entry.raw_data_end > entry.raw_data_offset:
-                    cursor.skip_to(entry.raw_data_offset)
-                else:
-                    cursor.skip_to(entry.local_header_offset)
-                    hdr30 = cursor.read_exact(LOCAL_HEADER_MIN_SIZE)
-                    fname_len, extra_len = ZipBinaryParser.parse_local_header_prefix(hdr30)
-                    if fname_len + extra_len > 0:
-                        cursor.skip_bytes(fname_len + extra_len)
-
-                crc_calc = StreamingCRC32()
-                decompressor = create_decompressor(entry.compression_method)
-
-                with open(local_file, "wb") as f_out:
-                    for payload_chunk in cursor.stream_n_bytes(entry.compressed_size):
-                        if not self.controller.check_and_wait():
-                            if journal:
-                                with progress_lock:
-                                    journal.flush_if_dirty()
-                            return
-
-                        decompressed = decompressor.decompress_chunk(payload_chunk)
-                        if decompressed:
-                            crc_calc.update(decompressed)
-                            f_out.write(decompressed)
-
-                        with progress_lock:
-                            _record_and_emit(entry.path, len(payload_chunk), len(decompressed) if decompressed else 0)
-
-                    final_bytes = decompressor.flush()
-                    if final_bytes:
-                        crc_calc.update(final_bytes)
-                        f_out.write(final_bytes)
-                        with progress_lock:
-                            _record_and_emit(entry.path, 0, len(final_bytes))
-
-                if self.verify_crc and entry.crc32:
-                    if not crc_calc.verify(entry.crc32):
-                        err_msg = (
-                            f"CRC32 mismatch for '{entry.path}': "
-                            f"computed {crc_calc.hexdigest()} != expected {entry.crc32}"
-                        )
-                        if journal:
-                            with progress_lock:
-                                journal.mark_file_failed(entry.path, err_msg)
-                        raise IntegrityError(err_msg)
-
-                with progress_lock:
-                    processed_files += 1
-                    if journal:
-                        journal.mark_file_completed(entry.path, crc_calc.hexdigest(), entry.uncompressed_size)
-                    _record_and_emit(entry.path, 0, 0)
-
+        # 3. Coalesce files into continuous Range Batches & execute
         batches = self._build_range_batches(files_to_extract, manifest.total_archive_size)
 
         try:
@@ -425,6 +491,7 @@ class StreamClient:
                     for fut in as_completed(futures):
                         fut.result()
         finally:
+            # Always flush journal and close persistent Keep-Alive sockets cleanly
             if journal:
                 journal.flush_if_dirty()
             for r in all_readers:
@@ -459,11 +526,15 @@ class StreamClient:
         target_dir: Union[str, Path],
         progress_cb: Optional[ProgressCallback] = None,
     ) -> Dict[str, Any]:
+        """
+        Execute streaming extraction from URL or file (auto-detects ZIP/ZIP64, RAR4/RAR5, and 7z).
+        """
         target_path = Path(target_dir).resolve()
         reader = RangeReader(archive_source, timeout=self.timeout, opener=self.opener)
         try:
             total_size = reader.get_total_size()
 
+            # 1. Format Auto-Detection via magic header bytes
             from liveextract.core.rar_parser import RarBinaryParser
             from liveextract.core.rar_extractor import is_sevenz, stream_and_extract_rar
             head_bytes = reader.read_range(0, min(15, total_size - 1))
@@ -490,6 +561,7 @@ class StreamClient:
                     head_bytes=head_bytes,
                 )
 
+            # 2. ZIP / ZIP64 Archive: Tail probe to read EOCD in RAM
             scan_len = min(total_size, 65536 + EOCD_MIN_SIZE)
             tail_bytes, _ = reader.read_tail(scan_len)
             eocd = ZipBinaryParser.find_eocd(tail_bytes, archive_size=total_size)
@@ -511,12 +583,14 @@ class StreamClient:
                     eocd.cd_size = z_cd_size
                     eocd.cd_offset = z_cd_offset
 
+            # 3. Fetch Central Directory buffer in 1 single request on the same Keep-Alive socket
             cd_bytes = reader.read_range(eocd.cd_offset, eocd.cd_offset + eocd.cd_size - 1)
             cd_entries = ZipBinaryParser.parse_central_directory(cd_bytes)
             eff_url = reader.effective_url
         finally:
             reader.close()
 
+        # 4. Build manifest immediately with ZERO per-file pre-scan HTTP requests
         file_entries: List[FileManifestEntry] = []
         total_uncompressed = 0
         file_count = 0
@@ -538,7 +612,7 @@ class StreamClient:
                     compression_method=cd_entry.compression_method,
                     crc32=cd_entry.crc32_hex,
                     local_header_offset=cd_entry.local_header_offset,
-                    raw_data_offset=-1,
+                    raw_data_offset=-1,  # Coalesced + resolved inline on-the-fly
                     raw_data_end=-1,
                 )
             )
