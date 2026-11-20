@@ -17,9 +17,10 @@ Instead of downloading a 50 GB archive to your drive, waiting for it to finish, 
   * **ZIP & ZIP64 (> 4 GB)**: `STORED (0)`, `DEFLATE (8)`, `BZIP2 (12)`, `LZMA (14)`, `ZSTD (93)`, and `XZ (95)`.
   * **RAR4, RAR5 (Standard & Solid), and 7z**: Pure zero-disk virtual COM stream bridge (`liveextract_7z_bridge.dll` → `7z.dll`) with a bounded 12 MB RAM read-ahead cache.
 * **Works With Signed & Proxy Links**: Automatically resolves filenames from `Content-Disposition`, preserves query signatures across redirects, and works without file extensions in the URL.
-* **Live Pause, Resume & Cryptographic Verification**:
+* **Live Pause, Resume, Cryptographic Verification & Smart Differential Updates**:
   * Pause and resume active transfers without losing progress.
   * Lockstep CRC-32 verification plus one-click integrity checking and missing-file repair.
+  * **Smart Differential Updater**: Updates existing folders against new archive releases by inspecting remote headers over HTTP Range and downloading *only* new or modified files, saving 90–99% of bandwidth.
 * **Lightweight Desktop App + Reusable Library**:
   * Minimal native GUI designed to stay smooth even on low-end hardware (no Electron/Chromium overhead).
   * Core `liveextract` package is completely decoupled from the GUI for use in scripts, CLIs, or custom launchers.
@@ -72,6 +73,12 @@ liveextract inspect https://example.com/archive.zip
 
 # Stream-extract directly to disk (4 parallel connections, 0 B archive written)
 liveextract stream https://example.com/archive.zip --dest ./output --workers 4
+
+# Verify cryptographic CRC-32 integrity of an extracted folder & repair missing files
+liveextract repair ./output --source https://example.com/archive.zip
+
+# Differential update: compare local folder against a new archive & stream only changed files
+liveextract update ./output --source https://example.com/archive_v2.zip --clean
 
 # Pre-generate a byte-offset manifest for custom game launchers (Mode A)
 liveextract manifest ./build.zip -o build.manifest.json
