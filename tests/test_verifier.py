@@ -1,5 +1,5 @@
 """
-Unit tests for cryptographic integrity verifier (missing file & corruption detection).
+Unit tests for cryptographic verifier and integrity checker.
 """
 
 import unittest
@@ -63,6 +63,59 @@ class TestVerifier(unittest.TestCase):
         self.assertGreater(len(report.corrupted_files), 0)
         corrupted_paths = [c[0].replace("\\", "/") for c in report.corrupted_files]
         self.assertTrue(any("bin/app.cfg" in p for p in corrupted_paths))
+
+    def test_verify_detects_same_size_zero_padded_corruption(self):
+        # Corrupt file with identical file size (e.g. pre-allocated zero bytes or bit flip)
+        cfg_file = self.dest_dir / "bin" / "app.cfg"
+        orig_size = cfg_file.stat().st_size
+        cfg_file.write_bytes(b"\x00" * orig_size)
+
+        report = verify_destination(self.dest_dir, archive_source=str(self.zip_file))
+        self.assertFalse(report.is_valid)
+        corrupted_paths = [c[0].replace("\\", "/") for c in report.corrupted_files]
+        self.assertTrue(any("bin/app.cfg" in p for p in corrupted_paths))
+
+    def test_repair_and_resume_corrupted_file(self):
+        from liveextract.client.state_journal import StateJournal
+        cfg_file = self.dest_dir / "bin" / "app.cfg"
+        orig_size = cfg_file.stat().st_size
+        cfg_file.write_bytes(b"\x00" * orig_size)
+
+        # Verification fails
+        report = verify_destination(self.dest_dir, archive_source=str(self.zip_file))
+        self.assertFalse(report.is_valid)
+
+        # Repair workflow: invalidate corrupted file and unlink
+        journal = StateJournal(self.dest_dir, str(self.zip_file))
+        for p, _ in report.corrupted_files:
+            journal.invalidate_file(p)
+            (self.dest_dir / Path(p)).unlink(missing_ok=True)
+
+        # Re-extract with resume=True
+        client = StreamClient(resume=True)
+        res = client.extract_from_manifest(
+            manifest=self.manifest,
+            archive_source=str(self.zip_file),
+            target_dir=self.dest_dir,
+        )
+        self.assertEqual(res["status"], "completed")
+
+        # Now verification passes completely
+        report2 = verify_destination(self.dest_dir, archive_source=str(self.zip_file))
+        self.assertTrue(report2.is_valid)
+        self.assertEqual(len(report2.corrupted_files), 0)
+        self.assertEqual(len(report2.missing_files), 0)
+
+    def test_verify_fallback_without_state_file(self):
+        # Remove state journal
+        state_f = self.dest_dir / ".extract_state.json"
+        if state_f.exists():
+            state_f.unlink()
+
+        # Should parse archive Central Directory directly and verify
+        report = verify_destination(self.dest_dir, archive_source=str(self.zip_file))
+        self.assertTrue(report.is_valid)
+        self.assertEqual(report.total_expected, self.manifest.total_files)
 
 
 if __name__ == "__main__":

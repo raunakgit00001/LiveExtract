@@ -58,6 +58,13 @@ class TestConcurrencyAndPause(unittest.TestCase):
 
             run_result = {}
             error_holder = []
+            paused_once = False
+
+            def on_prog(p):
+                nonlocal paused_once
+                if not paused_once:
+                    paused_once = True
+                    controller.pause()
 
             def run_worker():
                 try:
@@ -65,6 +72,7 @@ class TestConcurrencyAndPause(unittest.TestCase):
                         manifest=self.manifest,
                         archive_source=self.archive_url,
                         target_dir=dest_dir,
+                        progress_cb=on_prog,
                     )
                     run_result.update(res)
                 except Exception as ex:
@@ -73,9 +81,12 @@ class TestConcurrencyAndPause(unittest.TestCase):
             worker_thread = threading.Thread(target=run_worker)
             worker_thread.start()
 
-            # Wait briefly then pause
-            time.sleep(0.01)
-            controller.pause()
+            # Wait until paused
+            for _ in range(50):
+                if controller.is_paused:
+                    break
+                time.sleep(0.01)
+
             self.assertTrue(controller.is_paused)
             self.assertEqual(controller.status, "paused")
 
@@ -111,7 +122,7 @@ class TestConcurrencyAndPause(unittest.TestCase):
             worker_thread = threading.Thread(target=run_worker)
             worker_thread.start()
 
-            time.sleep(0.01)
+            time.sleep(0.02)
             controller.cancel()
             self.assertTrue(controller.is_cancelled)
 
