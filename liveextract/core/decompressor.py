@@ -16,6 +16,7 @@ import zlib
 from abc import ABC, abstractmethod
 from typing import Optional
 
+# Method ID -> Human readable name
 COMPRESSION_METHOD_NAMES = {
     0: "STORED",
     8: "DEFLATE",
@@ -36,20 +37,24 @@ class StreamDecompressor(ABC):
 
     @abstractmethod
     def decompress_chunk(self, data: bytes) -> bytes:
+        """Decompress an incoming compressed byte chunk, returning uncompressed bytes."""
         pass
 
     @abstractmethod
     def flush(self) -> bytes:
+        """Flush any internal buffers at the end of the compressed stream."""
         pass
 
     @property
     @abstractmethod
     def unconsumed_tail(self) -> bytes:
+        """Any unconsumed input bytes left over after decompression finishes."""
         pass
 
     @property
     @abstractmethod
     def eof(self) -> bool:
+        """True if the decompressor has reached end-of-stream."""
         pass
 
 
@@ -76,7 +81,11 @@ class StoredStreamDecompressor(StreamDecompressor):
 
 
 class RawDeflateStreamDecompressor(StreamDecompressor):
-    """Streaming DEFLATE decompressor for raw RFC 1951 payloads (ZIP method 8, 32 KB window)."""
+    """
+    Streaming DEFLATE decompressor for raw RFC 1951 payloads (ZIP compression method 8).
+    Initializes zlib with wbits = -15 (negative window bits) to strip zlib/gzip headers
+    and bind runtime RAM sliding window strictly to 32 KB.
+    """
 
     def __init__(self, window_bits: int = -15):
         self.decompress_obj = zlib.decompressobj(window_bits)
@@ -111,7 +120,11 @@ class RawDeflateStreamDecompressor(StreamDecompressor):
 
 
 class ZstdStreamDecompressor(StreamDecompressor):
-    """Streaming Zstandard (Zstd) decompressor (ZIP method 93)."""
+    """
+    Streaming Zstandard (Zstd) decompressor (ZIP compression method 93).
+    Uses Python 3.14+ native stdlib `compression.zstd`, with fallback to `zstandard` if installed.
+    Transparently handles multi-frame concatenated Zstd payloads.
+    """
 
     def __init__(self):
         self._backend = None
@@ -146,19 +159,26 @@ class ZstdStreamDecompressor(StreamDecompressor):
                 buf = data
                 while buf:
                     if self._dctx.eof:
-                        self._dctx = self._zstd_mod.ZstdDecompressor()
+                        # Handle concatenated Zstd frames seamlessly
+                        # Zstandard magic bytes: 0xFD2FB528 -> b"\x28\xb5\x2f\xfd"
+                        if len(buf) >= 4 and buf[:4] == b"(\xb5/\xfd":
+                            self._dctx = self._zstd_mod.ZstdDecompressor()
+                        else:
+                            self._unused = buf
+                            break
                     out = self._dctx.decompress(buf)
                     if out:
                         out_parts.append(out)
                     if self._dctx.eof:
-                        buf = self._dctx.unused_data
+                        buf = getattr(self._dctx, "unused_data", b"")
                         self._unused = buf
                     else:
                         buf = b""
                 self._eof = self._dctx.eof and not self._unused
                 return b"".join(out_parts)
             else:
-                return self._dctx.decompress(data)
+                out = self._dctx.decompress(data)
+                return out
         except Exception as err:
             raise DecompressionError(f"Corrupted Zstandard (method 93) stream: {err}") from err
 
@@ -212,7 +232,10 @@ class Bzip2StreamDecompressor(StreamDecompressor):
 
 
 class ZipLzmaStreamDecompressor(StreamDecompressor):
-    """Streaming LZMA decompressor for ZIP compression method 14 (PKWARE APPNOTE 5.8.8)."""
+    """
+    Streaming LZMA decompressor for ZIP compression method 14 (PKWARE APPNOTE 5.8.8).
+    Header layout: [2B version][2B props_size][props_size B LZMA1 properties][raw LZMA1 stream]
+    """
 
     def __init__(self):
         self._header_buf = bytearray()
@@ -297,10 +320,20 @@ class XzStreamDecompressor(StreamDecompressor):
 
 
 def get_compression_method_name(compression_method: int) -> str:
+    """Return human-readable name for a ZIP compression method ID."""
     return COMPRESSION_METHOD_NAMES.get(compression_method, f"METHOD_{compression_method}")
 
 
 def create_decompressor(compression_method: int) -> StreamDecompressor:
+    """
+    Factory creating the appropriate streaming decompressor based on ZIP compression method.
+      0  = STORED
+      8  = DEFLATE (Raw RFC 1951)
+      12 = BZIP2
+      14 = LZMA (ZIP APPNOTE 5.8.8)
+      93 = ZSTD (Zstandard)
+      95 = XZ
+    """
     if compression_method == 0:
         return StoredStreamDecompressor()
     elif compression_method == 8:
