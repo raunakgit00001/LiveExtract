@@ -42,8 +42,8 @@ class TestDifferentialUpdater(unittest.TestCase):
         self.assertEqual(len(plan.modified_files), 0)
         self.assertEqual(len(plan.new_files), 0)
         self.assertEqual(len(plan.unchanged_files), 4)
-        self.assertEqual(plan.total_download_bytes, 0)
-        self.assertEqual(plan.bandwidth_saved_pct, 100.0)
+        self.assertEqual(plan.download_bytes_needed, 0)
+        self.assertEqual(plan.savings_percent, 100.0)
 
     def test_check_and_apply_differential_update(self):
         # Create v2 archive with:
@@ -66,10 +66,18 @@ class TestDifferentialUpdater(unittest.TestCase):
         plan = check_for_updates(self.dest_dir, str(self.v2_zip))
         self.assertTrue(plan.has_updates)
         self.assertGreater(len(plan.modified_files) + len(plan.new_files), 0)
-        self.assertGreater(plan.bandwidth_saved_pct, 0.0)
+        self.assertGreater(plan.savings_percent, 0.0)
 
         # Apply update
-        res = apply_update_plan(plan, target_dir=self.dest_dir, remove_obsolete=True)
+        apply_update_plan(plan, remove_obsolete=True)
+
+        manifest_v2 = generate_manifest_from_zip(self.v2_zip)
+        client = StreamClient(resume=True)
+        res = client.extract_from_manifest(
+            manifest=manifest_v2,
+            archive_source=str(self.v2_zip),
+            target_dir=self.dest_dir,
+        )
         self.assertEqual(res["status"], "completed")
 
         # Verify that patch.dll exists and app.cfg has new content
