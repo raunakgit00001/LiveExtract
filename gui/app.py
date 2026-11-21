@@ -165,6 +165,277 @@ class SmoothProgressBar(tk.Canvas):
             self.create_rectangle(0, 0, fill_w, h, fill=self._bar_color, outline="")
 
 
+class RepairPromptDialog(tk.Toplevel):
+    """Modal dialog prompting user for the archive source (URL or file) to repair an existing folder."""
+
+    def __init__(self, parent, folder_path: Path, default_link: str = ""):
+        super().__init__(parent)
+        self.folder_path = folder_path
+        self.result: Optional[str] = None
+
+        self.title("Repair Folder")
+        self.configure(bg=C_BG)
+        self.resizable(False, False)
+        self.transient(parent)
+
+        # Center on parent window
+        w, h = 540, 230
+        try:
+            px = parent.winfo_rootx() + (parent.winfo_width() - w) // 2
+            py = parent.winfo_rooty() + (parent.winfo_height() - h) // 2
+            self.geometry(f"{w}x{h}+{max(0, px)}+{max(0, py)}")
+        except Exception:
+            self.geometry(f"{w}x{h}")
+
+        container = tk.Frame(self, bg=C_BG, padx=20, pady=16)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        tk.Label(
+            container,
+            text="Verify & Repair Existing Download",
+            font=("Segoe UI", 11, "bold"),
+            bg=C_BG,
+            fg=C_TEXT,
+        ).pack(anchor="w", pady=(0, 2))
+
+        folder_str = str(folder_path)
+        if len(folder_str) > 65:
+            folder_str = folder_str[:30] + "..." + folder_str[-32:]
+        tk.Label(
+            container,
+            text=f"Folder: {folder_str}",
+            font=("Segoe UI", 8),
+            bg=C_BG,
+            fg=C_MUTED,
+        ).pack(anchor="w", pady=(0, 12))
+
+        tk.Label(
+            container,
+            text="Archive Download Link or Local File (.zip, .rar, .7z):",
+            font=("Segoe UI", 9),
+            bg=C_BG,
+            fg=C_TEXT,
+        ).pack(anchor="w", pady=(0, 6))
+
+        row = tk.Frame(container, bg=C_BG)
+        row.pack(fill=tk.X, pady=(0, 16))
+
+        input_box = tk.Frame(row, bg=C_INPUT, highlightthickness=1, highlightbackground=C_BORDER)
+        input_box.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+
+        self.entry = tk.Entry(
+            input_box,
+            font=("Segoe UI", 9),
+            bg=C_INPUT,
+            fg=C_TEXT,
+            insertbackground=C_TEXT,
+            relief=tk.FLAT,
+            bd=0,
+        )
+        self.entry.pack(fill=tk.X, padx=8, pady=6)
+        if default_link:
+            self.entry.insert(0, default_link)
+
+        FlatButton(
+            row,
+            text="Browse...",
+            command=self._on_browse,
+            bg=C_SURFACE,
+            hover_bg=C_HOVER,
+            fg=C_TEXT,
+            font=("Segoe UI", 8),
+            padx=10,
+            pady=4,
+            border_color=C_BORDER,
+        ).pack(side=tk.RIGHT)
+
+        btn_row = tk.Frame(container, bg=C_BG)
+        btn_row.pack(fill=tk.X)
+
+        FlatButton(
+            btn_row,
+            text="Verify & Repair",
+            command=self._on_confirm,
+            bg=C_ACCENT,
+            hover_bg=C_ACCENT_HOVER,
+            fg="#FFFFFF",
+            font=("Segoe UI", 9, "bold"),
+            padx=16,
+            pady=7,
+        ).pack(side=tk.RIGHT, padx=(8, 0))
+
+        FlatButton(
+            btn_row,
+            text="Cancel",
+            command=self.destroy,
+            bg=C_SURFACE,
+            hover_bg=C_HOVER,
+            fg=C_MUTED,
+            font=("Segoe UI", 9),
+            padx=14,
+            pady=7,
+            border_color=C_BORDER,
+        ).pack(side=tk.RIGHT)
+
+        self.entry.focus_set()
+        self.bind("<Return>", lambda _e: self._on_confirm())
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.grab_set()
+
+    def _on_browse(self) -> None:
+        cand = filedialog.askopenfilename(
+            parent=self,
+            title="Select Original Archive File",
+            filetypes=[("Archive files", "*.zip;*.rar;*.7z;*.001"), ("All files", "*.*")],
+        )
+        if cand:
+            self.entry.delete(0, tk.END)
+            self.entry.insert(0, cand)
+
+    def _on_confirm(self) -> None:
+        val = self.entry.get().strip()
+        if not val:
+            messagebox.showwarning("LiveExtract", "Please enter a valid URL or select an archive file.", parent=self)
+            return
+        self.result = val
+        self.destroy()
+
+
+class UpdatePromptDialog(tk.Toplevel):
+    """Modal dialog prompting user for the new version archive link or file to update an existing folder."""
+
+    def __init__(self, parent, folder_path: Path, default_link: str = ""):
+        super().__init__(parent)
+        self.folder_path = folder_path
+        self.result: Optional[str] = None
+
+        self.title("Check for Updates")
+        self.configure(bg=C_BG)
+        self.resizable(False, False)
+        self.transient(parent)
+
+        w, h = 540, 230
+        try:
+            px = parent.winfo_rootx() + (parent.winfo_width() - w) // 2
+            py = parent.winfo_rooty() + (parent.winfo_height() - h) // 2
+            self.geometry(f"{w}x{h}+{max(0, px)}+{max(0, py)}")
+        except Exception:
+            self.geometry(f"{w}x{h}")
+
+        container = tk.Frame(self, bg=C_BG, padx=20, pady=16)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        tk.Label(
+            container,
+            text="Smart Differential Folder Update",
+            font=("Segoe UI", 11, "bold"),
+            bg=C_BG,
+            fg=C_TEXT,
+        ).pack(anchor="w", pady=(0, 2))
+
+        folder_str = str(folder_path)
+        if len(folder_str) > 65:
+            folder_str = folder_str[:30] + "..." + folder_str[-32:]
+        tk.Label(
+            container,
+            text=f"Target: {folder_str}",
+            font=("Segoe UI", 8),
+            bg=C_BG,
+            fg=C_MUTED,
+        ).pack(anchor="w", pady=(0, 12))
+
+        tk.Label(
+            container,
+            text="New Version Archive Link or Local File (.zip, .rar, .7z):",
+            font=("Segoe UI", 9),
+            bg=C_BG,
+            fg=C_TEXT,
+        ).pack(anchor="w", pady=(0, 6))
+
+        row = tk.Frame(container, bg=C_BG)
+        row.pack(fill=tk.X, pady=(0, 16))
+
+        input_box = tk.Frame(row, bg=C_INPUT, highlightthickness=1, highlightbackground=C_BORDER)
+        input_box.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+
+        self.entry = tk.Entry(
+            input_box,
+            font=("Segoe UI", 9),
+            bg=C_INPUT,
+            fg=C_TEXT,
+            insertbackground=C_TEXT,
+            relief=tk.FLAT,
+            bd=0,
+        )
+        self.entry.pack(fill=tk.X, padx=8, pady=6)
+        if default_link:
+            self.entry.insert(0, default_link)
+
+        FlatButton(
+            row,
+            text="Browse...",
+            command=self._on_browse,
+            bg=C_SURFACE,
+            hover_bg=C_HOVER,
+            fg=C_TEXT,
+            font=("Segoe UI", 8),
+            padx=10,
+            pady=4,
+            border_color=C_BORDER,
+        ).pack(side=tk.RIGHT)
+
+        btn_row = tk.Frame(container, bg=C_BG)
+        btn_row.pack(fill=tk.X)
+
+        FlatButton(
+            btn_row,
+            text="Check for Updates",
+            command=self._on_confirm,
+            bg=C_ACCENT,
+            hover_bg=C_ACCENT_HOVER,
+            fg="#FFFFFF",
+            font=("Segoe UI", 9, "bold"),
+            padx=16,
+            pady=7,
+        ).pack(side=tk.RIGHT, padx=(8, 0))
+
+        FlatButton(
+            btn_row,
+            text="Cancel",
+            command=self.destroy,
+            bg=C_SURFACE,
+            hover_bg=C_HOVER,
+            fg=C_MUTED,
+            font=("Segoe UI", 9),
+            padx=14,
+            pady=7,
+            border_color=C_BORDER,
+        ).pack(side=tk.RIGHT)
+
+        self.entry.focus_set()
+        self.bind("<Return>", lambda _e: self._on_confirm())
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.grab_set()
+
+    def _on_browse(self) -> None:
+        cand = filedialog.askopenfilename(
+            parent=self,
+            title="Select New Version Archive File",
+            filetypes=[("Archive files", "*.zip;*.rar;*.7z;*.001"), ("All files", "*.*")],
+        )
+        if cand:
+            self.entry.delete(0, tk.END)
+            self.entry.insert(0, cand)
+
+    def _on_confirm(self) -> None:
+        val = self.entry.get().strip()
+        if not val:
+            messagebox.showwarning("LiveExtract", "Please enter a valid URL or select an archive file.", parent=self)
+            return
+        self.result = val
+        self.destroy()
+
+
 class LiveExtractApp:
     COMPACT_HEIGHT = 400
     ADVANCED_HEIGHT = 640
@@ -503,6 +774,32 @@ class LiveExtractApp:
             hover_bg=C_HOVER,
             fg=C_TEXT,
             font=("Segoe UI", 8),
+            padx=10,
+            pady=4,
+            border_color=C_BORDER,
+        ).pack(side=tk.RIGHT, padx=(6, 0))
+
+        FlatButton(
+            r1,
+            text="Repair Folder...",
+            command=self._on_repair_folder,
+            bg=C_INPUT,
+            hover_bg=C_HOVER,
+            fg=C_ACCENT,
+            font=("Segoe UI", 8, "bold"),
+            padx=10,
+            pady=4,
+            border_color=C_BORDER,
+        ).pack(side=tk.RIGHT, padx=(6, 0))
+
+        FlatButton(
+            r1,
+            text="Update Folder...",
+            command=self._on_update_folder,
+            bg=C_INPUT,
+            hover_bg=C_HOVER,
+            fg=C_SUCCESS,
+            font=("Segoe UI", 8, "bold"),
             padx=10,
             pady=4,
             border_color=C_BORDER,
@@ -850,7 +1147,7 @@ class LiveExtractApp:
     def _on_verify(self) -> None:
         dest = self.dest_var.get().strip()
         if not dest or not Path(dest).exists():
-            messagebox.showinfo("LiveExtract", "Destination folder does not exist yet.")
+            self._on_repair_folder()
             return
 
         self.lbl_status.configure(text="Verifying files...", fg=C_MUTED)
@@ -882,11 +1179,280 @@ class LiveExtractApp:
                         "Integrity Check Failed",
                         f"{report.failure_summary}\n\nRe-download missing/corrupted files now?",
                     ):
-                        self._start_extraction()
+                        self._repair_corrupted_files(report)
 
             self.root.after(0, _show)
 
         threading.Thread(target=_bg_verify, daemon=True).start()
+
+    def _prompt_for_repair_link(self, folder_path: Path, default_link: str = "") -> Optional[str]:
+        dlg = RepairPromptDialog(self.root, folder_path, default_link)
+        self.root.wait_window(dlg)
+        return dlg.result
+
+    def _on_repair_folder(self) -> None:
+        """Select a folder and prompt for archive link to verify match and repair missing/corrupted files."""
+        initial = self.dest_var.get().strip()
+        if initial and not Path(initial).exists():
+            initial = str(Path.home() / "Downloads")
+        folder = filedialog.askdirectory(
+            title="Select Downloaded / Extracted Folder to Repair",
+            initialdir=initial or None,
+        )
+        if not folder:
+            return
+
+        folder_path = Path(folder).resolve()
+
+        # Try to discover link from .extract_state.json
+        suggested_url = ""
+        state_file = folder_path / ".extract_state.json"
+        if state_file.exists():
+            try:
+                import json
+                with open(state_file, "r", encoding="utf-8") as f:
+                    s_data = json.load(f)
+                    suggested_url = s_data.get("archive_source", "")
+            except Exception:
+                pass
+
+        if not suggested_url:
+            current_url = self._get_url()
+            if current_url:
+                suggested_url = current_url
+
+        archive_link = self._prompt_for_repair_link(folder_path, suggested_url)
+        if not archive_link:
+            return
+
+        self._start_repair_pipeline(folder_path, archive_link)
+
+    def _start_repair_pipeline(self, folder_path: Path, archive_link: str) -> None:
+        self.lbl_status.configure(text="Inspecting archive and checking content match...", fg=C_MUTED)
+        self._log(f"Matching folder '{folder_path.name}' against archive '{archive_link}'...")
+        self.btn_primary.set_enabled(False)
+
+        def _bg_worker():
+            from liveextract.core.repair import check_link_folder_match
+
+            is_match, match_res, expected_table = check_link_folder_match(folder_path, archive_link)
+
+            def _handle_match_result():
+                if not is_match:
+                    self.lbl_status.configure(text="Link does not match folder", fg=C_DANGER)
+                    self.btn_primary.set_enabled(True)
+                    if match_res.matched_names == 0 and match_res.total_folder_files > 0:
+                        self._log(f"Link mismatch: 0 of {match_res.total_folder_files} files matched.")
+                        messagebox.showerror(
+                            "Link Mismatch",
+                            f"None of the files in the archive match the selected folder!\n\n"
+                            f"Folder: {folder_path.name} ({match_res.total_folder_files} files)\n"
+                            f"Archive: {match_res.total_archive_files} files\n\n"
+                            f"The link appears to be for a completely different archive or game.\n"
+                            f"Please double-check the link or file.",
+                        )
+                        return
+                    else:
+                        proceed = messagebox.askyesno(
+                            "Match Warning",
+                            f"{match_res.message}\n\n"
+                            f"Only {match_res.matched_names} of {match_res.total_folder_files} files match ({match_res.confidence:.0%}).\n\n"
+                            f"Do you still want to proceed with repair?",
+                        )
+                        if not proceed:
+                            return
+
+                self._execute_repair_verification(folder_path, archive_link, expected_table)
+
+            self.root.after(0, _handle_match_result)
+
+        threading.Thread(target=_bg_worker, daemon=True).start()
+
+    def _execute_repair_verification(
+        self, folder_path: Path, archive_link: str, expected_table: Optional[Dict[str, Dict[str, Any]]] = None
+    ) -> None:
+        self.lbl_status.configure(text="Verifying file integrity (CRC-32)...", fg=C_MUTED)
+        self._log(f"Deep verifying files in {folder_path.name}...")
+
+        def _bg_verify():
+            from liveextract.core.verifier import verify_destination
+            from liveextract.core.repair import prepare_repair
+
+            report = verify_destination(folder_path, archive_source=archive_link)
+
+            def _show_results():
+                self.btn_primary.set_enabled(True)
+                if report.total_expected == 0:
+                    self.lbl_status.configure(text="No files found to verify", fg=C_WARN)
+                    messagebox.showwarning("LiveExtract", "Could not read archive file manifest from link.")
+                    return
+
+                if report.is_valid:
+                    self.lbl_status.configure(
+                        text=f"Verified  ·  All {report.total_expected} files 100% intact",
+                        fg=C_SUCCESS,
+                    )
+                    self._log(f"Verification passed: All {report.total_expected} files are 100% intact.")
+                    messagebox.showinfo(
+                        "Folder Verified",
+                        f"All {report.total_expected} files in '{folder_path.name}' are 100% intact and valid ({format_bytes(report.total_verified_bytes).strip()})!\n\n"
+                        f"No files need to be redownloaded.",
+                    )
+                    return
+
+                total_bad = len(report.missing_files) + len(report.corrupted_files)
+                self.lbl_status.configure(
+                    text=f"Repair needed: {len(report.missing_files)} missing, {len(report.corrupted_files)} corrupted",
+                    fg=C_WARN,
+                )
+                self._log(
+                    f"Integrity check found {len(report.missing_files)} missing and {len(report.corrupted_files)} corrupted file(s)."
+                )
+
+                summary_text = (
+                    f"Folder: {folder_path.name}\n\n"
+                    f"• Intact files: {len(report.intact_files)} (will NOT be re-downloaded)\n"
+                    f"• Missing files: {len(report.missing_files)}\n"
+                    f"• Corrupted files: {len(report.corrupted_files)}\n\n"
+                    f"LiveExtract will preserve all intact files and download ONLY the {total_bad} missing/corrupted files directly from the link.\n\n"
+                    f"Start repair now?"
+                )
+
+                if messagebox.askyesno("Confirm Repair Download", summary_text):
+                    prepare_repair(folder_path, archive_link, report, expected_table=expected_table)
+                    self._log(f"Purged corrupted files. Streaming repair for {total_bad} file(s)...")
+
+                    self.dest_var.set(str(folder_path))
+                    self.url_var.set(archive_link)
+                    self.url_entry.delete(0, tk.END)
+                    self.url_entry.insert(0, archive_link)
+                    self._placeholder_active = False
+                    self.url_entry.configure(fg=C_TEXT)
+
+                    self._start_extraction()
+
+            self.root.after(0, _show_results)
+
+        threading.Thread(target=_bg_verify, daemon=True).start()
+
+    def _repair_corrupted_files(self, report) -> None:
+        """Purge corrupted / missing files from state journal and disk, then trigger repair extraction."""
+        dest = self.dest_var.get().strip()
+        if not dest:
+            return
+        dest_path = Path(dest)
+        source = self._get_url()
+        from liveextract.core.repair import prepare_repair
+        prepare_repair(dest_path, source, report)
+        self._log(f"Repairing {len(report.missing_files) + len(report.corrupted_files)} file(s)...")
+        self._start_extraction()
+
+    def _prompt_for_update_link(self, folder_path: Path, default_link: str = "") -> Optional[str]:
+        dlg = UpdatePromptDialog(self.root, folder_path, default_link)
+        self.root.wait_window(dlg)
+        return dlg.result
+
+    def _on_update_folder(self) -> None:
+        """Prompt to select an installed folder and new archive link, then apply differential update."""
+        initial = self.dest_var.get().strip()
+        if initial and not Path(initial).exists():
+            initial = str(Path.home() / "Downloads")
+        folder = filedialog.askdirectory(
+            title="Select Installed Folder to Update / Patch",
+            initialdir=initial or None,
+        )
+        if not folder:
+            return
+
+        folder_path = Path(folder).resolve()
+
+        # Check existing state file for previously used archive source
+        suggested_url = ""
+        state_file = folder_path / ".extract_state.json"
+        if state_file.exists():
+            try:
+                import json
+                with open(state_file, "r", encoding="utf-8") as f:
+                    s_data = json.load(f)
+                    suggested_url = s_data.get("archive_source", "")
+            except Exception:
+                pass
+
+        new_link = self._prompt_for_update_link(folder_path, suggested_url)
+        if not new_link:
+            return
+
+        self._start_update_pipeline(folder_path, new_link)
+
+    def _start_update_pipeline(self, folder_path: Path, new_archive_link: str) -> None:
+        self.lbl_status.configure(text="Inspecting server archive for updates...", fg=C_MUTED)
+        self._log(f"Comparing '{folder_path.name}' against new archive '{new_archive_link}'...")
+        self.btn_primary.set_enabled(False)
+
+        def _bg_worker():
+            from liveextract.core.updater import check_for_updates, apply_update_plan
+
+            try:
+                plan = check_for_updates(folder_path, new_archive_link)
+            except Exception as err:
+                def _err():
+                    self.lbl_status.configure(text="Update check failed", fg=C_DANGER)
+                    self.btn_primary.set_enabled(True)
+                    messagebox.showerror("Update Error", f"Failed to inspect server archive: {err}")
+                self.root.after(0, _err)
+                return
+
+            def _handle_plan():
+                self.btn_primary.set_enabled(True)
+                if not plan.has_updates:
+                    self.lbl_status.configure(text="Folder is already up to date", fg=C_SUCCESS)
+                    self._log(f"Folder '{folder_path.name}' is already up to date with '{new_archive_link}'.")
+                    messagebox.showinfo(
+                        "Up to Date",
+                        f"All {plan.total_remote_files} files already match the latest server archive!\n\n"
+                        f"No update is required.",
+                    )
+                    return
+
+                # Updates found
+                self.lbl_status.configure(
+                    text=f"Update found: {len(plan.modified_files)} modified, {len(plan.new_files)} new",
+                    fg=C_WARN,
+                )
+                self._log(
+                    f"Update diff: {len(plan.unchanged_files)} unchanged, "
+                    f"{len(plan.modified_files)} modified, {len(plan.new_files)} new, "
+                    f"{len(plan.obsolete_files)} removed."
+                )
+
+                summary_text = (
+                    f"Differential Update Available for '{folder_path.name}':\n\n"
+                    f"• Unchanged files: {len(plan.unchanged_files)} (preserved · 0 B downloaded)\n"
+                    f"• Modified files:  {len(plan.modified_files)}\n"
+                    f"• New files:       {len(plan.new_files)}\n"
+                    f"• Obsolete files:  {len(plan.obsolete_files)}\n\n"
+                    f"Download required: {format_bytes(plan.download_bytes_needed)}\n"
+                    f"Bandwidth saved:   {format_bytes(plan.bytes_saved)} ({plan.savings_percent:.1f}% saved!)\n\n"
+                    f"LiveExtract will update only the changed/new files without re-downloading the entire archive.\n\n"
+                    f"Apply update now?"
+                )
+
+                if messagebox.askyesno("Apply Differential Update", summary_text):
+                    apply_update_plan(plan, remove_obsolete=True)
+                    self._log(f"Applied update plan. Streaming {len(plan.modified_files) + len(plan.new_files)} file(s)...")
+
+                    self.dest_var.set(str(folder_path))
+                    self.url_var.set(new_archive_link)
+                    self.url_entry.delete(0, tk.END)
+                    self.url_entry.insert(0, new_archive_link)
+                    self._placeholder_active = False
+                    self.url_entry.configure(fg=C_TEXT)
+
+                    self._start_extraction()
+
+            self.root.after(0, _handle_plan)
+
+        threading.Thread(target=_bg_worker, daemon=True).start()
 
 
 def launch_gui() -> None:
