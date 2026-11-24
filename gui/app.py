@@ -465,8 +465,9 @@ class LiveExtractApp:
         # Settings
         self.url_var = tk.StringVar(value="")
         self.dest_var = tk.StringVar(value=_default_output_dir())
-        self.workers_var = tk.IntVar(value=4)
-        self.chunk_var = tk.StringVar(value="256 KB")
+        self.speed_mode_var = tk.StringVar(value="max")
+        self.workers_var = tk.IntVar(value=8)
+        self.chunk_var = tk.StringVar(value="1 MB")
         self.clipboard_catch_var = tk.BooleanVar(value=True)
         self.resume_var = tk.BooleanVar(value=True)
         self.verify_var = tk.BooleanVar(value=True)
@@ -499,8 +500,11 @@ class LiveExtractApp:
         hdr = tk.Frame(container, bg=C_BG)
         hdr.pack(fill=tk.X, pady=(0, 16))
 
+        title_box = tk.Frame(hdr, bg=C_BG)
+        title_box.pack(side=tk.LEFT)
+
         tk.Label(
-            hdr,
+            title_box,
             text="LiveExtract",
             font=("Segoe UI", 16, "bold"),
             bg=C_BG,
@@ -508,12 +512,42 @@ class LiveExtractApp:
         ).pack(side=tk.LEFT)
 
         tk.Label(
-            hdr,
+            title_box,
             text="Direct stream extractor",
             font=("Segoe UI", 9),
             bg=C_BG,
             fg=C_HINT,
         ).pack(side=tk.LEFT, padx=(10, 0), pady=(5, 0))
+
+        # Speed Mode Selector (⚡ Max Speed vs 🌿 Optimized)
+        mode_pill = tk.Frame(hdr, bg=C_INPUT, highlightthickness=1, highlightbackground=C_BORDER)
+        mode_pill.pack(side=tk.RIGHT)
+
+        self.btn_mode_max = FlatButton(
+            mode_pill,
+            text="⚡ Max Speed",
+            command=lambda: self._set_speed_mode("max"),
+            bg=C_ACCENT,
+            hover_bg=C_ACCENT_HOVER,
+            fg="#FFFFFF",
+            font=("Segoe UI", 8, "bold"),
+            padx=10,
+            pady=4,
+        )
+        self.btn_mode_max.pack(side=tk.LEFT)
+
+        self.btn_mode_opt = FlatButton(
+            mode_pill,
+            text="🌿 Optimized",
+            command=lambda: self._set_speed_mode("optimized"),
+            bg=C_INPUT,
+            hover_bg=C_HOVER,
+            fg=C_MUTED,
+            font=("Segoe UI", 8),
+            padx=10,
+            pady=4,
+        )
+        self.btn_mode_opt.pack(side=tk.LEFT)
 
         # ── Link Input Row ───────────────────────────────────────
         url_frame = tk.Frame(
@@ -615,7 +649,8 @@ class LiveExtractApp:
             insertbackground=C_TEXT,
             relief=tk.FLAT,
             bd=0,
-        ).pack(fill=tk.X, padx=10, pady=6)
+        )
+        dest_box.winfo_children()[0].pack(fill=tk.X, padx=10, pady=6)
 
         FlatButton(
             dest_row,
@@ -955,6 +990,21 @@ class LiveExtractApp:
         threading.Thread(target=_bg, daemon=True).start()
 
     # ── UI Controls & Drawer ─────────────────────────────────────
+    def _set_speed_mode(self, mode: str) -> None:
+        self.speed_mode_var.set(mode)
+        if mode == "max":
+            self.btn_mode_max.set_style(bg=C_ACCENT, hover_bg=C_ACCENT_HOVER, fg="#FFFFFF")
+            self.btn_mode_opt.set_style(bg=C_INPUT, hover_bg=C_HOVER, fg=C_MUTED)
+            self.workers_var.set(8)
+            self.chunk_var.set("1 MB")
+            self._log("⚡ Switched to Max Speed mode (8 connections, 1 MB buffer, 64 MB batches, 4 MB TCP window).")
+        else:
+            self.btn_mode_max.set_style(bg=C_INPUT, hover_bg=C_HOVER, fg=C_MUTED)
+            self.btn_mode_opt.set_style(bg=C_ACCENT, hover_bg=C_ACCENT_HOVER, fg="#FFFFFF")
+            self.workers_var.set(4)
+            self.chunk_var.set("256 KB")
+            self._log("🌿 Switched to Optimized mode (4 connections, 256 KB buffer, balanced RAM).")
+
     def _toggle_advanced(self, _e=None) -> None:
         self._advanced_open = not self._advanced_open
         if self._advanced_open:
@@ -1080,7 +1130,7 @@ class LiveExtractApp:
         self.progress.set_progress(0.0, color=C_ACCENT)
         self.lbl_status.configure(text="Connecting...", fg=C_TEXT)
         self.lbl_speed.configure(text="")
-        self._log(f"Starting stream ({workers} connections, {self.chunk_var.get()} buffer)...")
+        self._log(f"Starting stream ({workers} connections, {self.chunk_var.get()} buffer, {self.speed_mode_var.get().upper()} mode)...")
 
         client = StreamClient(
             chunk_size=chunk_size,
@@ -1088,6 +1138,7 @@ class LiveExtractApp:
             verify_crc=self.verify_var.get(),
             resume=self.resume_var.get(),
             controller=self.controller,
+            speed_mode=self.speed_mode_var.get(),
         )
 
         last_ui = [0.0]
