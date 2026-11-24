@@ -191,8 +191,15 @@ class StreamClient:
         resume: bool = True,
         opener: Optional[urllib.request.OpenerDirector] = None,
         controller: Optional[StreamController] = None,
+        speed_mode: str = "max",   # "max" (Max Speed) or "optimized" (Balanced/Conservative)
     ):
-        self.chunk_size = chunk_size
+        self.speed_mode = speed_mode.lower() if speed_mode else "max"
+        # In max speed mode, tune default chunk buffer to 1 MB if left at 256 KB default
+        if self.speed_mode == "max" and chunk_size == 262144:
+            self.chunk_size = 1048576  # 1 MB
+        else:
+            self.chunk_size = chunk_size
+
         self.max_workers = max(1, max_workers)
         self.timeout = timeout
         self.verify_crc = verify_crc
@@ -208,6 +215,7 @@ class StreamClient:
         """
         Coalesce adjacent ZIP entries into large continuous HTTP Range batches.
         Eliminates hundreds of tiny HTTP requests and TLS handshakes for small game files.
+        Adapts batch size up to 64 MB in Max Speed mode to saturate fast networks.
         """
         if not entries:
             return []
@@ -215,13 +223,20 @@ class StreamClient:
         sorted_entries = sorted(entries, key=lambda e: e.local_header_offset)
         total_comp = sum(e.compressed_size for e in sorted_entries)
 
-        # Target batch size: keep all workers saturated, up to 16 MB per continuous Range request
-        if self.max_workers > 1 and total_comp > 0:
-            target_batch_bytes = max(2 * 1024 * 1024, min(16 * 1024 * 1024, total_comp // (self.max_workers * 2)))
+        # Target batch size: adapt to speed mode and archive size
+        if self.speed_mode == "max":
+            max_batch = 64 * 1024 * 1024  # 64 MB
+            min_batch = 8 * 1024 * 1024   # 8 MB
+            max_gap_bytes = 128 * 1024    # 128 KB
         else:
-            target_batch_bytes = 16 * 1024 * 1024
+            max_batch = 16 * 1024 * 1024  # 16 MB
+            min_batch = 2 * 1024 * 1024   # 2 MB
+            max_gap_bytes = 64 * 1024     # 64 KB
 
-        max_gap_bytes = 64 * 1024  # Coalesce if gap between adjacent files <= 64 KB
+        if self.max_workers > 1 and total_comp > 0:
+            target_batch_bytes = max(min_batch, min(max_batch, total_comp // (self.max_workers * 2)))
+        else:
+            target_batch_bytes = max_batch
 
         def _entry_bounds(e: FileManifestEntry) -> Tuple[int, int]:
             if e.raw_data_offset >= 0 and e.raw_data_end > e.raw_data_offset:
@@ -273,9 +288,9 @@ class StreamClient:
         allocator = DiskAllocator(target_path)
         journal = StateJournal(target_path, archive_source) if self.resume else None
 
-        # 1. Pre-allocate disk hierarchy & files
+        # 1. Validate free disk space & compute path mappings in RAM (allocate_files=False eliminates multi-minute freeze)
         manifest_dict_list = [f.to_dict() for f in manifest.files]
-        allocated_paths = allocator.pre_allocate_manifest(manifest_dict_list, verify_space=True)
+        allocated_paths = allocator.pre_allocate_manifest(manifest_dict_list, verify_space=True, allocate_files=False)
 
         # 2. Filter files to download (skip dirs & already completed files)
         files_to_extract: List[FileManifestEntry] = []
@@ -311,7 +326,8 @@ class StreamClient:
         def _get_worker_reader() -> RangeReader:
             r = getattr(thread_local, "reader", None)
             if r is None:
-                r = RangeReader(stream_target, timeout=self.timeout, opener=self.opener)
+                rcvbuf = (4 * 1024 * 1024) if self.speed_mode == "max" else 1048576
+                r = RangeReader(stream_target, timeout=self.timeout, opener=self.opener, socket_rcvbuf=rcvbuf)
                 r._total_size = manifest.total_archive_size
                 thread_local.reader = r
                 with readers_lock:
@@ -419,7 +435,12 @@ class StreamClient:
                     decompressor = create_decompressor(entry.compression_method)
 
                     try:
-                        with open(local_file, "wb") as f_out:
+                        local_file.parent.mkdir(parents=True, exist_ok=True)
+                        with open(local_file, "wb", buffering=min(self.chunk_size, 4 * 1024 * 1024)) as f_out:
+                            accumulated_payload = 0
+                            accumulated_uncomp = 0
+                            last_emit_time = time.time()
+
                             for payload_chunk in cursor.stream_n_bytes(entry.compressed_size):
                                 if not self.controller.check_and_wait():
                                     if journal:
@@ -431,16 +452,27 @@ class StreamClient:
                                 if decompressed:
                                     crc_calc.update(decompressed)
                                     f_out.write(decompressed)
+                                    accumulated_uncomp += len(decompressed)
+                                accumulated_payload += len(payload_chunk)
 
-                                with progress_lock:
-                                    _record_and_emit(entry.path, len(payload_chunk), len(decompressed) if decompressed else 0)
+                                # Throttled progress update: batch emissions to eliminate lock contention across threads
+                                now_chunk = time.time()
+                                if accumulated_payload >= 1048576 or (now_chunk - last_emit_time) >= 0.08:
+                                    with progress_lock:
+                                        _record_and_emit(entry.path, accumulated_payload, accumulated_uncomp)
+                                    accumulated_payload = 0
+                                    accumulated_uncomp = 0
+                                    last_emit_time = now_chunk
 
                             final_bytes = decompressor.flush()
                             if final_bytes:
                                 crc_calc.update(final_bytes)
                                 f_out.write(final_bytes)
+                                accumulated_uncomp += len(final_bytes)
+
+                            if accumulated_payload > 0 or accumulated_uncomp > 0:
                                 with progress_lock:
-                                    _record_and_emit(entry.path, 0, len(final_bytes))
+                                    _record_and_emit(entry.path, accumulated_payload, accumulated_uncomp)
                     except Exception as stream_err:
                         try:
                             if local_file.exists():
@@ -559,6 +591,7 @@ class StreamClient:
                     progress_cb=progress_cb,
                     controller=self.controller,
                     head_bytes=head_bytes,
+                    speed_mode=self.speed_mode,
                 )
 
             # 2. ZIP / ZIP64 Archive: Tail probe to read EOCD in RAM
