@@ -44,12 +44,14 @@ class RangeReader:
         timeout: float = 20.0,
         opener: Optional[urllib.request.OpenerDirector] = None,
         custom_headers: Optional[Dict[str, str]] = None,
+        socket_rcvbuf: int = 2097152,  # 2 MB socket receive buffer for high bandwidth-delay product
     ):
         self.source = source
         self.max_retries = max_retries
         self.backoff_sec = backoff_sec
         self.timeout = timeout
         self.opener = opener
+        self.socket_rcvbuf = socket_rcvbuf
         self.headers = dict(DEFAULT_HEADERS)
         if custom_headers:
             self.headers.update(custom_headers)
@@ -123,7 +125,8 @@ class RangeReader:
         if conn.sock is not None:
             try:
                 conn.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                conn.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 512 * 1024)
+                if self.socket_rcvbuf > 0:
+                    conn.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, self.socket_rcvbuf)
             except OSError:
                 pass
 

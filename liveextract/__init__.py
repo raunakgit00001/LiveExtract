@@ -4,4 +4,4 @@ Streams ZIP, ZIP64, RAR4, RAR5, and 7z archives straight from HTTP into extracte
 without saving the compressed archive to disk.
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"

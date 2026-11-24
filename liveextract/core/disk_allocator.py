@@ -92,6 +92,8 @@ class DiskAllocator:
         """
         Pre-allocate all directories and files defined in a file list / manifest.
         Returns mapping from archive path string to resolved local Path object.
+        If allocate_files is False, paths and disk space are validated in RAM immediately
+        without touching disk, avoiding multi-minute file allocation freezes on large archives.
         """
         self.root_dir.mkdir(parents=True, exist_ok=True)
         
@@ -107,17 +109,17 @@ class DiskAllocator:
 
         allocated_paths: Dict[str, Path] = {}
 
-        # 1. First create all directory paths
         for entry in files:
             path_str = entry["path"]
             resolved = self.sanitize_path(path_str)
             allocated_paths[path_str] = resolved
             
             if entry.get("is_dir", False) or path_str.endswith("/"):
-                resolved.mkdir(parents=True, exist_ok=True)
-            else:
-                resolved.parent.mkdir(parents=True, exist_ok=True)
                 if allocate_files:
+                    resolved.mkdir(parents=True, exist_ok=True)
+            else:
+                if allocate_files:
+                    resolved.parent.mkdir(parents=True, exist_ok=True)
                     size = entry.get("uncompressed_size", 0)
                     self.pre_allocate_file(resolved, size, skip_if_exists=skip_if_exists)
 

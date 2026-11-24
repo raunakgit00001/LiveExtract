@@ -9,10 +9,15 @@ Instead of downloading a 50 GB archive to your drive, waiting for it to finish, 
 ## Key Features
 
 * **Zero Temporary Archive Storage**: Never saves the `.zip`, `.rar`, or `.7z` archive file to disk — even temporarily.
-* **Full Line-Speed Streaming**:
+* **Full Line-Speed Streaming & Selectable Speed Profiles**:
+  * **⚡ Max Speed Profile**: Saturated gigabit throughput with 8 parallel connections, 1 MB chunk buffers, 64 MB batch coalescing, and 4 MB TCP receive windows.
+  * **🌿 Optimized Profile**: Balanced resource profile for background downloads or lower-spec machines.
   * Persistent HTTP/1.1 Keep-Alive TLS connections (eliminates repeated handshakes).
-  * Contiguous Range Batch Coalescing (merges hundreds of small files into continuous 16 MB streams).
+  * Contiguous Range Batch Coalescing (merges hundreds of small files into continuous streams up to 64 MB).
   * Multi-connection parallel workers (`1–16` connections).
+* **Instant Start on Massive Archives (60–80+ GB)**:
+  * Eliminates multi-minute disk pre-allocation freezes on archives with tens of thousands of files.
+  * Validates disk space in RAM in 1 ms and writes files on-the-fly, avoiding empty placeholder folders.
 * **Broad Archive & Codec Support**:
   * **ZIP & ZIP64 (> 4 GB)**: `STORED (0)`, `DEFLATE (8)`, `BZIP2 (12)`, `LZMA (14)`, `ZSTD (93)`, and `XZ (95)`.
   * **RAR4, RAR5 (Standard & Solid), and 7z**: Pure zero-disk virtual COM stream bridge (`liveextract_7z_bridge.dll` → `7z.dll`) with a bounded 12 MB RAM read-ahead cache.
@@ -71,8 +76,11 @@ liveextract gui
 # Inspect a remote archive's contents in RAM without downloading it
 liveextract inspect https://example.com/archive.zip
 
-# Stream-extract directly to disk (4 parallel connections, 0 B archive written)
-liveextract stream https://example.com/archive.zip --dest ./output --workers 4
+# Stream-extract directly to disk at maximum speed (8 parallel connections, 0 B archive written)
+liveextract stream https://example.com/archive.zip --dest ./output --mode max
+
+# Stream-extract with balanced/optimized profile
+liveextract stream https://example.com/archive.zip --dest ./output --mode optimized
 
 # Verify cryptographic CRC-32 integrity of an extracted folder & repair missing files
 liveextract repair ./output --source https://example.com/archive.zip
@@ -99,58 +107,15 @@ result = client.extract_from_url(
     target_dir="./extracted",
     progress_cb=lambda p: print(f"{p.percent:.1f}%  {p.net_bytes_per_second / 1e6:.2f} MB/s"),
 )
-print(result)
 ```
 
 ---
 
-## Building the Portable Version Yourself
+## License & Attribution
 
-```powershell
-# 1. Install PyInstaller (only needed for building .exe)
-pip install pyinstaller
+This project is licensed under the **PolyForm Noncommercial License 1.0.0**.
 
-# 2. Run the portable build script (compiles native DLLs + packages LiveExtract.exe + portable ZIP)
-.\scripts\build_portable.ps1
-```
-
-Outputs are created in:
-* `dist/LiveExtract/LiveExtract.exe`
-* `dist/LiveExtract-Portable-Windows-x64.zip`
-
----
-
-## Running Tests
-
-```bash
-python -m unittest discover -s tests -p "test_*.py"
-```
-
----
-
-## Project Structure
-
-```text
-LiveExtract/
-├── liveextract/          # Decoupled core library (CLI + SDK)
-│   ├── core/             # ZIP/ZIP64 parser, multi-codec decompressors, RAR/7z zero-disk bridge, CRC-32 verifier
-│   ├── client/           # Keep-Alive RangeReader, Batch Coalescer, Pause/Resume controller, link inspector
-│   ├── server/           # Lightweight RFC 7233 byte-range & manifest HTTP server
-│   └── cli/              # Command-line interface
-├── gui/                  # Minimal native desktop UI (low-end friendly, collapsible Advanced drawer)
-├── native/               # C/C++ sources (DEFLATE core & 7z.dll COM virtual stream bridge)
-├── scripts/              # One-click portable build scripts
-├── tests/                # Automated unit & end-to-end test suite
-└── launcher.py           # Desktop entry point
-```
-
----
-
-## License & Commercial Use
-
-LiveExtract is licensed under the **[PolyForm Noncommercial License 1.0.0](LICENSE)** (`PolyForm-Noncommercial-1.0.0`).
-
-* **Free for Noncommercial Use**: You are free to download, use, modify, and share LiveExtract for personal, educational, research, hobby, or other noncommercial projects.
-* **Credit Required**: If you use, redistribute, or build on any part of LiveExtract in another project, you must include the license (or its URL) and preserve the required attribution notice from [NOTICE](NOTICE):
-  > `Required Notice: Copyright (c) 2026 Raunak Kumar — LiveExtract (https://github.com/raunakgit00001/LiveExtract)`
-* **Commercial Licensing**: You may **not** sell, paywall, bundle into a commercial product, or otherwise monetize LiveExtract (in original or modified form) without a separate commercial license. For commercial licensing or revenue-sharing inquiries, please contact the author via [GitHub](https://github.com/raunakgit00001/LiveExtract/issues).
+* **Free for Personal, Educational, and Non-Commercial Use**: You may download, use, modify, redistribute, and adapt this software freely for personal or non-commercial purposes.
+* **Attribution Required**: You must retain the original copyright notice, author credits, and license notice in all copies or substantial portions of the software.
+* **Commercial Use**: Any commercial use, sale, integration into paid commercial software, or monetize-for-profit distribution requires an explicit commercial agreement.
+* See the full [LICENSE](LICENSE) and [NOTICE](NOTICE) files for legal terms.
