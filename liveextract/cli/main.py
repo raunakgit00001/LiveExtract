@@ -128,12 +128,21 @@ def cmd_stream(args: argparse.Namespace) -> int:
     print(f" Mode:        {'Mode A (Manifest-driven)' if manifest_path else 'Mode B (Direct HTTP Range)'}")
     print(f"=======================================================\n")
 
+    workers = args.workers
+    chunk_size = args.chunk_size
+    if getattr(args, "speed_mode", "max") == "max":
+        if workers == 1:
+            workers = 8
+        if chunk_size == 262144:
+            chunk_size = 1048576
+
     client = StreamClient(
-        chunk_size=args.chunk_size,
-        max_workers=args.workers,
+        chunk_size=chunk_size,
+        max_workers=workers,
         timeout=args.timeout,
         verify_crc=not args.no_verify,
         resume=not args.no_resume,
+        speed_mode=getattr(args, "speed_mode", "max"),
     )
 
     last_print = 0.0
@@ -257,6 +266,7 @@ def cmd_repair(args: argparse.Namespace) -> int:
 
     from liveextract.core.repair import check_link_folder_match, prepare_repair
     from liveextract.core.verifier import verify_destination
+    from liveextract.client.stream_client import StreamProgress
 
     print("[1/3] Inspecting archive & checking content match...")
     is_match, match_res, expected_table = check_link_folder_match(target_dir, source)
@@ -302,12 +312,21 @@ def cmd_repair(args: argparse.Namespace) -> int:
     print("\n[3/3] Purging corrupted files and streaming repair...")
     prepare_repair(target_dir, source, report)
 
+    workers = args.workers
+    chunk_size = args.chunk_size
+    if getattr(args, "speed_mode", "max") == "max":
+        if workers == 1:
+            workers = 8
+        if chunk_size == 262144:
+            chunk_size = 1048576
+
     client = StreamClient(
-        chunk_size=args.chunk_size,
-        max_workers=args.workers,
+        chunk_size=chunk_size,
+        max_workers=workers,
         timeout=args.timeout,
         verify_crc=not args.no_verify,
         resume=True,
+        speed_mode=getattr(args, "speed_mode", "max"),
     )
 
     def _prog(p: StreamProgress):
@@ -358,6 +377,7 @@ def cmd_update(args: argparse.Namespace) -> int:
     print(f"Update Source: {source}\n")
 
     from liveextract.core.updater import check_for_updates, apply_update_plan
+    from liveextract.client.stream_client import StreamProgress
 
     print("[1/2] Inspecting remote archive & comparing local files...")
     plan = check_for_updates(target_dir, source)
@@ -387,12 +407,21 @@ def cmd_update(args: argparse.Namespace) -> int:
 
     apply_update_plan(plan, remove_obsolete=args.clean)
 
+    workers = args.workers
+    chunk_size = args.chunk_size
+    if getattr(args, "speed_mode", "max") == "max":
+        if workers == 1:
+            workers = 8
+        if chunk_size == 262144:
+            chunk_size = 1048576
+
     client = StreamClient(
-        chunk_size=args.chunk_size,
-        max_workers=args.workers,
+        chunk_size=chunk_size,
+        max_workers=workers,
         timeout=args.timeout,
         verify_crc=not args.no_verify,
         resume=True,
+        speed_mode=getattr(args, "speed_mode", "max"),
     )
 
     def _prog(p: StreamProgress):
@@ -435,6 +464,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_stream.add_argument("source", help="URL or path to archive")
     p_stream.add_argument("--dest", "-d", required=True, help="Destination directory")
     p_stream.add_argument("--manifest", "-m", help="Optional pre-computed manifest.json (Mode A)")
+    p_stream.add_argument("--speed-mode", "--mode", dest="speed_mode", choices=["max", "optimized"], default="max", help="Extraction speed profile: 'max' (high concurrency, 1MB buffer, max TCP throughput) or 'optimized' (balanced RAM & CPU)")
     p_stream.add_argument("--chunk-size", type=int, default=262144, help="Streaming chunk size (default: 256KB)")
     p_stream.add_argument("--workers", "-w", type=int, default=1, help="Concurrent workers for parallel range streams (default: 1)")
     p_stream.add_argument("--timeout", type=float, default=20.0, help="Network timeout in seconds")
@@ -446,6 +476,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_repair = subparsers.add_parser("repair", help="Verify and repair an existing folder against an archive link")
     p_repair.add_argument("dest", help="Path to existing extracted folder to verify and repair")
     p_repair.add_argument("--source", "-s", help="URL or path to original archive (auto-detected if omitted)")
+    p_repair.add_argument("--speed-mode", "--mode", dest="speed_mode", choices=["max", "optimized"], default="max", help="Speed profile: 'max' or 'optimized'")
     p_repair.add_argument("--chunk-size", type=int, default=262144, help="Streaming chunk size (default: 256KB)")
     p_repair.add_argument("--workers", "-w", type=int, default=1, help="Concurrent workers (default: 1)")
     p_repair.add_argument("--timeout", type=float, default=20.0, help="Network timeout in seconds")
@@ -458,6 +489,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_update.add_argument("dest", help="Path to existing extracted folder to update")
     p_update.add_argument("--source", "-s", help="URL or path to new archive version")
     p_update.add_argument("--clean", action="store_true", help="Remove obsolete files deleted in the new version")
+    p_update.add_argument("--speed-mode", "--mode", dest="speed_mode", choices=["max", "optimized"], default="max", help="Speed profile: 'max' or 'optimized'")
     p_update.add_argument("--chunk-size", type=int, default=262144, help="Streaming chunk size (default: 256KB)")
     p_update.add_argument("--workers", "-w", type=int, default=1, help="Concurrent workers (default: 1)")
     p_update.add_argument("--timeout", type=float, default=20.0, help="Network timeout in seconds")
