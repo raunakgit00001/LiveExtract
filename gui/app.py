@@ -449,6 +449,19 @@ class LiveExtractApp:
         self.root.minsize(540, self.COMPACT_HEIGHT)
         self.root.resizable(True, False)
 
+        # Window & Taskbar Icon
+        _icon_candidates = [
+            Path(__file__).resolve().parent.parent / "assets" / "icon.ico",
+            Path(getattr(sys, "_MEIPASS", "")) / "assets" / "icon.ico",
+        ]
+        for _cand in _icon_candidates:
+            if _cand.exists():
+                try:
+                    self.root.iconbitmap(str(_cand))
+                    break
+                except Exception:
+                    pass
+
         # Runtime state
         self.controller = StreamController()
         self._worker_thread: Optional[threading.Thread] = None
