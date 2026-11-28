@@ -1116,7 +1116,7 @@ class LiveExtractApp:
         elif self._secondary_mode == "verify":
             self._on_verify()
 
-    def _start_extraction(self) -> None:
+    def _start_extraction(self, strip_prefix: str = "") -> None:
         source = self._get_url()
         dest = self.dest_var.get().strip()
         if not source:
@@ -1175,7 +1175,7 @@ class LiveExtractApp:
 
         def _run():
             try:
-                res = client.extract_from_url(source, dest, progress_cb=progress_cb)
+                res = client.extract_from_url(source, dest, progress_cb=progress_cb, strip_prefix=strip_prefix)
                 status = res.get("status")
 
                 def _finish():
@@ -1428,7 +1428,7 @@ class LiveExtractApp:
                     self._placeholder_active = False
                     self.url_entry.configure(fg=C_TEXT)
 
-                    self._start_extraction()
+                    self._start_extraction(strip_prefix=path_prefix)
 
             self.root.after(0, _show_results)
 
@@ -1442,9 +1442,10 @@ class LiveExtractApp:
         dest_path = Path(dest)
         source = self._get_url()
         from liveextract.core.repair import prepare_repair
-        prepare_repair(dest_path, source, report)
+        pfx = getattr(report, "path_prefix", "")
+        prepare_repair(dest_path, source, report, path_prefix=pfx)
         self._log(f"Repairing {len(report.missing_files) + len(report.corrupted_files)} file(s)...")
-        self._start_extraction()
+        self._start_extraction(strip_prefix=pfx)
 
     def _prompt_for_update_link(self, folder_path: Path, default_link: str = "") -> Optional[str]:
         dlg = UpdatePromptDialog(self.root, folder_path, default_link)
