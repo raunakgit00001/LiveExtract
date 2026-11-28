@@ -356,7 +356,7 @@ def cmd_repair(args: argparse.Namespace) -> int:
         fname = Path(p.current_file).name[:30]
         print(f"\rRepairing: {pct:5.1f}% | {speed_mb:5.1f} MB/s | {fname:<30}", end="", flush=True)
 
-    result = client.extract_from_url(source, target_dir, progress_cb=_prog)
+    result = client.extract_from_url(source, target_dir, progress_cb=_prog, strip_prefix=match_res.path_prefix)
     print("\n")
     if result.get("status") == "completed":
         print(f"✅ Folder successfully repaired and 100% verified! Total files: {result.get('total_files')}")
