@@ -28,7 +28,7 @@ from liveextract.core.binary_parser import (
 )
 from liveextract.core.manifest import ArchiveManifest, FileManifestEntry
 from liveextract.core.decompressor import create_decompressor
-from liveextract.core.disk_allocator import DiskAllocator
+from liveextract.core.disk_allocator import DiskAllocator, InsufficientDiskSpaceError
 from liveextract.core.checksum import StreamingCRC32
 from liveextract.client.range_reader import RangeReader
 from liveextract.client.state_journal import StateJournal
@@ -280,19 +280,25 @@ class StreamClient:
         target_dir: Union[str, Path],
         progress_cb: Optional[ProgressCallback] = None,
         effective_url: Optional[str] = None,
+        strip_prefix: str = "",
     ) -> Dict[str, Any]:
         """
         Execute high-speed streaming extraction using Range Batch Coalescing and persistent Keep-Alive sockets.
         """
         target_path = Path(target_dir).resolve()
         allocator = DiskAllocator(target_path)
-        journal = StateJournal(target_path, archive_source) if self.resume else None
+        journal = StateJournal(target_path, archive_source, path_prefix=strip_prefix) if self.resume else None
 
-        # 1. Validate free disk space & compute path mappings in RAM (allocate_files=False eliminates multi-minute freeze)
-        manifest_dict_list = [f.to_dict() for f in manifest.files]
-        allocated_paths = allocator.pre_allocate_manifest(manifest_dict_list, verify_space=True, allocate_files=False)
+        # Determine effective path prefix (e.g. if archive root folder was stripped on disk)
+        effective_prefix = strip_prefix or (journal.path_prefix if journal else "")
 
-        # 2. Filter files to download (skip dirs & already completed files)
+        # 1. Compute path mappings in RAM (instant 0 ms resolution with Zip Slip defense)
+        allocated_paths: Dict[str, Path] = {}
+        for entry in manifest.files:
+            disk_p = entry.path[len(effective_prefix):] if (effective_prefix and entry.path.startswith(effective_prefix)) else entry.path
+            allocated_paths[entry.path] = allocator.sanitize_path(disk_p)
+
+        # 2. Filter files to download (skip dirs & already completed/intact files)
         files_to_extract: List[FileManifestEntry] = []
         uncompressed_done = 0
         compressed_streamed = 0
@@ -307,6 +313,30 @@ class StreamClient:
                 processed_files += 1
             else:
                 files_to_extract.append(entry)
+
+        # 3. Validate free disk space ONLY for the files that actually need to be extracted!
+        # (Files already intact on disk / completed in journal take 0 bytes of new space)
+        if files_to_extract:
+            needed_bytes = 0
+            for entry in files_to_extract:
+                local_file = allocated_paths[entry.path]
+                if local_file.exists() and local_file.is_file():
+                    try:
+                        cur_size = local_file.stat().st_size
+                        delta = max(0, entry.uncompressed_size - cur_size)
+                    except OSError:
+                        delta = entry.uncompressed_size
+                else:
+                    delta = entry.uncompressed_size
+                needed_bytes += delta
+
+            has_space, free_b, req_b = allocator.check_disk_space(needed_bytes)
+            if not has_space:
+                raise InsufficientDiskSpaceError(
+                    f"Insufficient disk space on {target_path}: "
+                    f"Available {free_b / 1024 / 1024:.2f} MB, "
+                    f"Required {(req_b + 10 * 1024 * 1024) / 1024 / 1024:.2f} MB"
+                )
 
         self.controller.start()
         start_time = time.time()
@@ -557,6 +587,7 @@ class StreamClient:
         archive_source: str,
         target_dir: Union[str, Path],
         progress_cb: Optional[ProgressCallback] = None,
+        strip_prefix: str = "",
     ) -> Dict[str, Any]:
         """
         Execute streaming extraction from URL or file (auto-detects ZIP/ZIP64, RAR4/RAR5, and 7z).
@@ -665,4 +696,5 @@ class StreamClient:
             target_dir=target_path,
             progress_cb=progress_cb,
             effective_url=eff_url,
+            strip_prefix=strip_prefix,
         )
