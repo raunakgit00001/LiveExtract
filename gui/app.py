@@ -649,8 +649,7 @@ class LiveExtractApp:
             insertbackground=C_TEXT,
             relief=tk.FLAT,
             bd=0,
-        )
-        dest_box.winfo_children()[0].pack(fill=tk.X, padx=10, pady=6)
+        ).pack(fill=tk.X, padx=10, pady=6)
 
         FlatButton(
             dest_row,
@@ -1210,7 +1209,12 @@ class LiveExtractApp:
             def _show():
                 if report.total_expected == 0:
                     self.lbl_status.configure(text="No manifest found", fg=C_WARN)
-                    messagebox.showinfo("Verify", "No extraction manifest (.extract_state.json) found in this folder.")
+                    if messagebox.askyesno(
+                        "No Manifest Found",
+                        "This folder does not contain a LiveExtract manifest (.extract_state.json).\n\n"
+                        "Would you like to verify and repair it using its original archive link or file?",
+                    ):
+                        self._on_repair_folder()
                     return
 
                 if report.is_valid:
@@ -1313,23 +1317,54 @@ class LiveExtractApp:
                         if not proceed:
                             return
 
-                self._execute_repair_verification(folder_path, archive_link, expected_table)
+                self._execute_repair_verification(folder_path, archive_link, expected_table, match_res.path_prefix)
 
             self.root.after(0, _handle_match_result)
 
         threading.Thread(target=_bg_worker, daemon=True).start()
 
     def _execute_repair_verification(
-        self, folder_path: Path, archive_link: str, expected_table: Optional[Dict[str, Dict[str, Any]]] = None
+        self,
+        folder_path: Path,
+        archive_link: str,
+        expected_table: Optional[Dict[str, Dict[str, Any]]] = None,
+        path_prefix: str = "",
     ) -> None:
         self.lbl_status.configure(text="Verifying file integrity (CRC-32)...", fg=C_MUTED)
+        self.progress.set_progress(0.0, color=C_ACCENT)
+        self.lbl_speed.configure(text="")
         self._log(f"Deep verifying files in {folder_path.name}...")
 
         def _bg_verify():
             from liveextract.core.verifier import verify_destination
             from liveextract.core.repair import prepare_repair
 
-            report = verify_destination(folder_path, archive_source=archive_link)
+            last_ui = [0.0]
+
+            def _on_prog(info, *extra):
+                now = time.time()
+                if now - last_ui[0] < 0.08:
+                    return
+                last_ui[0] = now
+                if hasattr(info, "percent"):
+                    p = info
+                    def _update():
+                        self.progress.set_progress(p.percent, color=C_ACCENT)
+                        fname = Path(p.current_file).name if p.current_file else "Scanning"
+                        self.lbl_status.configure(text=f"Verifying {p.percent:.1f}% · {fname[:24]}", fg=C_TEXT)
+                        speed_mb = p.bytes_per_second / (1024 * 1024)
+                        scanned_str = format_bytes(p.bytes_scanned).strip()
+                        total_str = format_bytes(p.total_bytes).strip()
+                        self.lbl_speed.configure(text=f"{speed_mb:.1f} MB/s · {scanned_str} / {total_str}")
+                    self.root.after(0, _update)
+
+            report = verify_destination(
+                folder_path,
+                archive_source=archive_link,
+                progress_cb=_on_prog,
+                expected_table=expected_table,
+                path_prefix=path_prefix,
+            )
 
             def _show_results():
                 self.btn_primary.set_enabled(True)
@@ -1370,7 +1405,7 @@ class LiveExtractApp:
                 )
 
                 if messagebox.askyesno("Confirm Repair Download", summary_text):
-                    prepare_repair(folder_path, archive_link, report, expected_table=expected_table)
+                    prepare_repair(folder_path, archive_link, report, expected_table=expected_table, path_prefix=path_prefix)
                     self._log(f"Purged corrupted files. Streaming repair for {total_bad} file(s)...")
 
                     self.dest_var.set(str(folder_path))
