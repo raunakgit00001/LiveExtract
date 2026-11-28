@@ -45,8 +45,24 @@ class VerificationReport:
         return "\n".join(lines)
 
 
-def calculate_file_crc32(file_path: Path, chunk_size: int = 65536) -> str:
-    """Compute the CRC-32 checksum of a local file on disk."""
+@dataclass
+class VerificationProgress:
+    """Live progress during cryptographic verification."""
+    current_file: str
+    file_index: int
+    total_files: int
+    bytes_scanned: int
+    total_bytes: int
+    bytes_per_second: float
+    percent: float
+
+
+def calculate_file_crc32(
+    file_path: Path,
+    chunk_size: int = 1048576,
+    progress_cb: Optional[Callable[[int], None]] = None,
+) -> str:
+    """Compute the CRC-32 checksum of a local file on disk using 1 MB chunks."""
     crc = 0
     with open(file_path, "rb") as f:
         while True:
@@ -54,6 +70,8 @@ def calculate_file_crc32(file_path: Path, chunk_size: int = 65536) -> str:
             if not chunk:
                 break
             crc = zlib.crc32(chunk, crc)
+            if progress_cb:
+                progress_cb(len(chunk))
     return f"{(crc & 0xFFFFFFFF):08X}"
 
 
@@ -65,6 +83,7 @@ def get_expected_file_table(
     Retrieve the table of expected files, sizes, and CRC-32 checksums.
     Prefers authoritative archive headers when archive_source is provided,
     falling back to .extract_state.json.
+    Supports remote/local ZIP, ZIP64, and RAR archives.
     """
     # 1. Authoritative archive source inspection (RAM only via HTTP Range / Central Directory)
     if archive_source:
@@ -74,40 +93,56 @@ def get_expected_file_table(
             from liveextract.core.binary_parser import (
                 ZipBinaryParser, EOCD_MIN_SIZE, ZIP64_EOCD_MIN_SIZE, ZIP64_EOCD_SIGNATURE
             )
+            from liveextract.core.rar_parser import RarBinaryParser
             reader = RangeReader(archive_source)
             try:
                 total_size = reader.get_total_size()
-                scan_len = min(total_size, 65536 + EOCD_MIN_SIZE)
-                tail_bytes, _ = reader.read_tail(scan_len)
-                eocd = ZipBinaryParser.find_eocd(tail_bytes, archive_size=total_size)
-                if (
-                    eocd.is_zip64
-                    and eocd.zip64_eocd_offset is not None
-                    and (eocd.cd_offset == 0xFFFFFFFF or eocd.cd_size == 0xFFFFFFFF)
-                ):
-                    z64_buf = reader.read_range(
-                        eocd.zip64_eocd_offset,
-                        eocd.zip64_eocd_offset + ZIP64_EOCD_MIN_SIZE - 1,
-                    )
-                    if len(z64_buf) >= ZIP64_EOCD_MIN_SIZE and z64_buf[:4] == ZIP64_EOCD_SIGNATURE:
-                        _, _, _, _, _, _, _, z_total_recs, z_cd_size, z_cd_offset = struct.unpack(
-                            "<4sQHHIIQQQQ", z64_buf[:ZIP64_EOCD_MIN_SIZE]
+                head_bytes = reader.read_range(0, min(total_size - 1, 15))
+                if RarBinaryParser.is_rar(head_bytes):
+                    full_head = reader.read_range(0, min(total_size - 1, 524288))
+                    rar_info = RarBinaryParser.inspect(full_head)
+                    entries: Dict[str, Dict[str, Any]] = {}
+                    for rf in rar_info.files:
+                        if not rf.is_dir:
+                            norm_p = rf.filename.replace("\\", "/")
+                            entries[norm_p] = {
+                                "size": rf.uncompressed_size,
+                                "crc32": f"{rf.crc32:08X}" if rf.crc32 else "",
+                            }
+                    if entries:
+                        return entries
+                else:
+                    scan_len = min(total_size, 65536 + EOCD_MIN_SIZE)
+                    tail_bytes, _ = reader.read_tail(scan_len)
+                    eocd = ZipBinaryParser.find_eocd(tail_bytes, archive_size=total_size)
+                    if (
+                        eocd.is_zip64
+                        and eocd.zip64_eocd_offset is not None
+                        and (eocd.cd_offset == 0xFFFFFFFF or eocd.cd_size == 0xFFFFFFFF)
+                    ):
+                        z64_buf = reader.read_range(
+                            eocd.zip64_eocd_offset,
+                            eocd.zip64_eocd_offset + ZIP64_EOCD_MIN_SIZE - 1,
                         )
-                        eocd.total_records = z_total_recs
-                        eocd.cd_size = z_cd_size
-                        eocd.cd_offset = z_cd_offset
-                cd_bytes = reader.read_range(eocd.cd_offset, eocd.cd_offset + eocd.cd_size - 1)
-                cd_entries = ZipBinaryParser.parse_central_directory(cd_bytes)
-                entries: Dict[str, Dict[str, Any]] = {}
-                for cd_entry in cd_entries:
-                    if not cd_entry.is_dir:
-                        norm_p = cd_entry.filename.replace("\\", "/")
-                        entries[norm_p] = {
-                            "size": cd_entry.uncompressed_size,
-                            "crc32": cd_entry.crc32_hex,
-                        }
-                if entries:
-                    return entries
+                        if len(z64_buf) >= ZIP64_EOCD_MIN_SIZE and z64_buf[:4] == ZIP64_EOCD_SIGNATURE:
+                            _, _, _, _, _, _, _, z_total_recs, z_cd_size, z_cd_offset = struct.unpack(
+                                "<4sQHHIIQQQQ", z64_buf[:ZIP64_EOCD_MIN_SIZE]
+                            )
+                            eocd.total_records = z_total_recs
+                            eocd.cd_size = z_cd_size
+                            eocd.cd_offset = z_cd_offset
+                    cd_bytes = reader.read_range(eocd.cd_offset, eocd.cd_offset + eocd.cd_size - 1)
+                    cd_entries = ZipBinaryParser.parse_central_directory(cd_bytes)
+                    entries = {}
+                    for cd_entry in cd_entries:
+                        if not cd_entry.is_dir:
+                            norm_p = cd_entry.filename.replace("\\", "/")
+                            entries[norm_p] = {
+                                "size": cd_entry.uncompressed_size,
+                                "crc32": cd_entry.crc32_hex,
+                            }
+                    if entries:
+                        return entries
             finally:
                 reader.close()
         except Exception:
@@ -172,20 +207,63 @@ def get_expected_file_table(
     return {}
 
 
+def _emit_verification_progress(
+    progress_cb: Optional[Callable],
+    cur_file: str,
+    file_idx: int,
+    total_files: int,
+    bytes_scanned: int,
+    total_bytes: int,
+    speed_bps: float,
+    percent: float,
+) -> None:
+    if not progress_cb:
+        return
+    import inspect
+    try:
+        sig = inspect.signature(progress_cb)
+        if len(sig.parameters) == 1:
+            progress_cb(
+                VerificationProgress(
+                    current_file=cur_file,
+                    file_index=file_idx,
+                    total_files=total_files,
+                    bytes_scanned=bytes_scanned,
+                    total_bytes=total_bytes,
+                    bytes_per_second=speed_bps,
+                    percent=percent,
+                )
+            )
+        else:
+            progress_cb(cur_file, file_idx, total_files)
+    except Exception:
+        try:
+            progress_cb(cur_file, file_idx, total_files)
+        except Exception:
+            pass
+
+
 def verify_destination(
     target_dir: Path,
     archive_source: Optional[str] = None,
-    progress_cb: Optional[Callable[[str, int, int], None]] = None,
+    progress_cb: Optional[Callable[..., None]] = None,
+    max_workers: int = 4,
+    expected_table: Optional[Dict[str, Dict[str, Any]]] = None,
+    path_prefix: str = "",
 ) -> VerificationReport:
     """
     Perform deep verification of all files in target_dir against expected manifest:
-    1. Existence check (identifies deleted / missing files)
-    2. Size check (identifies truncated files)
-    3. CRC-32 hash check (identifies modified or corrupted bytes)
+    1. Existence check (identifies deleted / missing files in 0 ms)
+    2. Size check (identifies truncated files in 0 ms)
+    3. Multi-threaded CRC-32 hash check using 1 MB chunks (saturates NVMe/SSD read rate)
     """
+    import threading
+    import concurrent.futures
+
     t0 = time.time()
     target_path = Path(target_dir).resolve()
-    expected_table = get_expected_file_table(target_path, archive_source)
+    if expected_table is None:
+        expected_table = get_expected_file_table(target_path, archive_source)
 
     if not expected_table:
         return VerificationReport(
@@ -194,29 +272,52 @@ def verify_destination(
             corrupted_files=[("", "No manifest or transaction journal (.extract_state.json) found to verify against")],
         )
 
+    # Auto-detect path alignment if not provided (e.g. archive root folder stripped on disk)
+    if not path_prefix and expected_table:
+        first_parts = set()
+        for p in expected_table:
+            parts = p.split("/", 1)
+            if len(parts) > 1:
+                first_parts.add(parts[0])
+            else:
+                first_parts = set()
+                break
+        if len(first_parts) == 1:
+            cand_pfx = list(first_parts)[0] + "/"
+            sample_keys = [k for k in expected_table.keys()][:10]
+            matched_raw = sum(1 for k in sample_keys if (target_path / Path(k)).exists())
+            matched_stripped = sum(1 for k in sample_keys if (target_path / Path(k[len(cand_pfx):])).exists())
+            if matched_stripped > matched_raw:
+                path_prefix = cand_pfx
+
+    def _to_local_path(rel_p: str) -> Path:
+        if path_prefix and rel_p.startswith(path_prefix):
+            return target_path / Path(rel_p[len(path_prefix):])
+        return target_path / Path(rel_p)
+
     intact: List[str] = []
     missing: List[str] = []
     corrupted: List[Tuple[str, str]] = []
-    total_bytes = 0
 
     total_files = len(expected_table)
-    for idx, (rel_path, meta) in enumerate(expected_table.items(), 1):
-        if progress_cb:
-            progress_cb(rel_path, idx, total_files)
+    total_bytes = sum(m.get("size", 0) for m in expected_table.values())
 
+    # Phase 1: Fast existence and size check (instant metadata audit)
+    crc_candidates: List[Tuple[str, Path, int, str]] = []
+    bytes_scanned = [0]
+    lock = threading.Lock()
+    last_emit = [0.0]
+
+    for rel_path, meta in expected_table.items():
         expected_size = meta.get("size", 0)
         expected_crc = meta.get("crc32", "").strip().upper()
         file_status = meta.get("status", "")
+        local_file = _to_local_path(rel_path)
 
-        # Resolve local disk file
-        local_file = target_path / Path(rel_path)
-
-        # 1. Check file existence
         if not local_file.exists() or not local_file.is_file():
             missing.append(rel_path)
             continue
 
-        # 2. Check byte length
         actual_size = local_file.stat().st_size
         if actual_size != expected_size:
             corrupted.append(
@@ -224,40 +325,76 @@ def verify_destination(
             )
             continue
 
-        # 3. Check status flag (pending/failed/missing files are never considered intact)
-        if file_status in ("pending", "missing", "failed"):
-            if expected_crc:
-                actual_crc = calculate_file_crc32(local_file)
-                if actual_crc != expected_crc:
-                    corrupted.append(
-                        (rel_path, f"Incomplete/unverified file (CRC-32 mismatch: expected {expected_crc}, got {actual_crc})")
+        if file_status in ("pending", "missing", "failed") and not expected_crc:
+            corrupted.append(
+                (rel_path, f"Incomplete file (download status: {file_status})")
+            )
+            continue
+
+        if not expected_crc:
+            intact.append(rel_path)
+            with lock:
+                bytes_scanned[0] += actual_size
+            continue
+
+        crc_candidates.append((rel_path, local_file, expected_size, expected_crc))
+
+    # Phase 2: High-throughput multi-threaded CRC-32 verification (1 MB buffers)
+    done_count = [len(missing) + len(corrupted) + len(intact)]
+
+    def _check_single_candidate(item: Tuple[str, Path, int, str]) -> Tuple[str, bool, str, str]:
+        rel_p, loc_f, exp_sz, exp_crc = item
+        def _on_chunk(n: int) -> None:
+            now = time.time()
+            with lock:
+                bytes_scanned[0] += n
+                if now - last_emit[0] >= 0.08:
+                    last_emit[0] = now
+                    elapsed = max(0.001, now - t0)
+                    bps = bytes_scanned[0] / elapsed
+                    pct = min(100.0, (bytes_scanned[0] / max(1, total_bytes)) * 100.0)
+                    _emit_verification_progress(
+                        progress_cb, rel_p, done_count[0], total_files, bytes_scanned[0], total_bytes, bps, pct
                     )
-                    continue
+
+        try:
+            actual_crc = calculate_file_crc32(loc_f, chunk_size=1048576, progress_cb=_on_chunk)
+            is_ok = (actual_crc == exp_crc)
+            with lock:
+                done_count[0] += 1
+            return rel_p, is_ok, exp_crc, actual_crc
+        except Exception as err:
+            with lock:
+                done_count[0] += 1
+            return rel_p, False, exp_crc, str(err)
+
+    if crc_candidates:
+        workers = max(1, min(max_workers, len(crc_candidates), os.cpu_count() or 4))
+        if workers > 1:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+                results = list(executor.map(_check_single_candidate, crc_candidates))
+        else:
+            results = [_check_single_candidate(c) for c in crc_candidates]
+
+        for rel_p, is_ok, exp_crc, actual_crc in results:
+            if is_ok:
+                intact.append(rel_p)
             else:
                 corrupted.append(
-                    (rel_path, f"Incomplete file (download status: {file_status})")
+                    (rel_p, f"CRC-32 mismatch: expected {exp_crc}, got {actual_crc}")
                 )
-                continue
-
-        total_bytes += actual_size
-
-        # 4. Check CRC-32 (if recorded)
-        if expected_crc:
-            actual_crc = calculate_file_crc32(local_file)
-            if actual_crc != expected_crc:
-                corrupted.append(
-                    (rel_path, f"CRC-32 mismatch: expected {expected_crc}, got {actual_crc}")
-                )
-                continue
-
-        intact.append(rel_path)
 
     elapsed = max(0.001, time.time() - t0)
+    final_scanned = bytes_scanned[0]
+    _emit_verification_progress(
+        progress_cb, "", total_files, total_files, final_scanned, total_bytes, final_scanned / elapsed, 100.0
+    )
+
     return VerificationReport(
         total_expected=total_files,
         intact_files=intact,
         missing_files=missing,
         corrupted_files=corrupted,
-        total_verified_bytes=total_bytes,
+        total_verified_bytes=final_scanned,
         elapsed_seconds=elapsed,
     )

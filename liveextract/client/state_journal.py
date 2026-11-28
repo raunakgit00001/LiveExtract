@@ -83,19 +83,29 @@ class StateJournal:
         if local_path.stat().st_size != expected_size:
             return False
 
+        # Fast-path: If the file is recorded as completed in the journal with matching
+        # byte size and matching CRC-32, accept immediately without re-reading 100 GB from disk.
+        if (
+            entry
+            and entry.get("status") == "completed"
+            and entry.get("size") == expected_size
+            and (not expected_crc32 or entry.get("crc32", "").strip().upper() == expected_crc32.strip().upper())
+        ):
+            return True
+
         # If file status is explicitly pending, in_progress, or failed: not completed
         if entry and entry.get("status") in ("pending", "in_progress", "failed"):
             if not expected_crc32:
                 return False
 
-        # If expected CRC-32 is provided, verify bitwise integrity of file on disk
+        # If expected CRC-32 is provided, verify bitwise integrity of file on disk using 1 MB chunks
         if expected_crc32:
             import zlib
             crc = 0
             try:
                 with open(local_path, "rb") as f:
                     while True:
-                        chunk = f.read(65536)
+                        chunk = f.read(1048576)
                         if not chunk:
                             break
                         crc = zlib.crc32(chunk, crc)
