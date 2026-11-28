@@ -210,7 +210,9 @@ def prepare_repair(
     """
     import time
     target_path = Path(target_dir).resolve()
-    journal = StateJournal(target_path, archive_source)
+    journal = StateJournal(target_path, archive_source, path_prefix=path_prefix)
+    if path_prefix:
+        journal._data["path_prefix"] = path_prefix
 
     # 1. Ensure all expected files are registered in journal manifest
     if not expected_table:
@@ -249,8 +251,7 @@ def prepare_repair(
         journal.invalidate_file(norm_p, expected_size=exp_size, expected_crc32=exp_crc)
 
         # Unlink bad file from disk so disk doesn't retain corrupted bytes or pre-allocated zeroes
-        disk_p = norm_p[len(path_prefix):] if (path_prefix and norm_p.startswith(path_prefix)) else norm_p
-        bad_file = target_path / Path(disk_p)
+        bad_file = journal.resolve_local_path(norm_p)
         try:
             if bad_file.exists() and bad_file.is_file():
                 bad_file.unlink()
