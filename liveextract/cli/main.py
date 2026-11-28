@@ -266,7 +266,6 @@ def cmd_repair(args: argparse.Namespace) -> int:
 
     from liveextract.core.repair import check_link_folder_match, prepare_repair
     from liveextract.core.verifier import verify_destination
-    from liveextract.client.stream_client import StreamProgress
 
     print("[1/3] Inspecting archive & checking content match...")
     is_match, match_res, expected_table = check_link_folder_match(target_dir, source)
@@ -288,7 +287,29 @@ def cmd_repair(args: argparse.Namespace) -> int:
     print(f"      Match confirmed: {match_res.matched_names}/{match_res.total_folder_files} folder files match.")
 
     print("\n[2/3] Cryptographic CRC-32 integrity verification...")
-    report = verify_destination(target_dir, archive_source=source)
+
+    def _verify_prog(cur_file, idx=0, total=0, *extra):
+        if hasattr(cur_file, "current_file"):
+            p = cur_file
+            speed_mb = p.bytes_per_second / (1024 * 1024)
+            scanned_str = _format_size(p.bytes_scanned).strip()
+            total_str = _format_size(p.total_bytes).strip()
+            fname = Path(p.current_file).name[:24] if p.current_file else "Done"
+            sys.stdout.write(
+                f"\rVerifying: {p.percent:5.1f}% | {speed_mb:5.1f} MB/s | {scanned_str} / {total_str} | [{p.file_index}/{p.total_files}] {fname:<24}"
+            )
+        else:
+            sys.stdout.write(f"\rVerifying: [{idx}/{total}] {Path(cur_file).name[:28]:<28}")
+        sys.stdout.flush()
+
+    report = verify_destination(
+        target_dir,
+        archive_source=source,
+        progress_cb=_verify_prog,
+        expected_table=expected_table,
+        path_prefix=match_res.path_prefix,
+    )
+    print("")
 
     if report.is_valid:
         print(f"\n✅ All {report.total_expected} files are already 100% intact! No repairs needed.")
@@ -310,7 +331,7 @@ def cmd_repair(args: argparse.Namespace) -> int:
             return 1
 
     print("\n[3/3] Purging corrupted files and streaming repair...")
-    prepare_repair(target_dir, source, report)
+    prepare_repair(target_dir, source, report, expected_table=expected_table, path_prefix=match_res.path_prefix)
 
     workers = args.workers
     chunk_size = args.chunk_size
@@ -377,7 +398,6 @@ def cmd_update(args: argparse.Namespace) -> int:
     print(f"Update Source: {source}\n")
 
     from liveextract.core.updater import check_for_updates, apply_update_plan
-    from liveextract.client.stream_client import StreamProgress
 
     print("[1/2] Inspecting remote archive & comparing local files...")
     plan = check_for_updates(target_dir, source)
