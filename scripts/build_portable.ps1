@@ -27,13 +27,18 @@ try {
     $addDataArgs = @()
     if (Test-Path "liveextract_core.dll") { $addDataArgs += @("--add-data", "liveextract_core.dll;.") }
     if (Test-Path "liveextract_7z_bridge.dll") { $addDataArgs += @("--add-data", "liveextract_7z_bridge.dll;.") }
+    if (Test-Path "assets\icon.ico") { $addDataArgs += @("--add-data", "assets\icon.ico;assets") }
+
+    $iconArgs = @()
+    if (Test-Path "assets\icon.ico") { $iconArgs += @("--icon", "assets\icon.ico") }
 
     $pyArgs = @(
         "-m", "PyInstaller",
         "--noconfirm",
         "--onedir",
         "--windowed",
-        "--name", "LiveExtract",
+        "--name", "LiveExtract"
+    ) + $iconArgs + @(
         "--hidden-import", "compression.zstd",
         "--hidden-import", "_zstd",
         "--hidden-import", "bz2",
