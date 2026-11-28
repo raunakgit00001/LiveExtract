@@ -17,7 +17,7 @@ class StateJournal:
 
     STATE_FILENAME = ".extract_state.json"
 
-    def __init__(self, target_dir: Path, archive_source: str, flush_interval: float = 1.5):
+    def __init__(self, target_dir: Path, archive_source: str, flush_interval: float = 1.5, path_prefix: str = ""):
         self.target_dir = Path(target_dir)
         self.archive_source = archive_source
         self.state_file = self.target_dir / self.STATE_FILENAME
@@ -25,6 +25,37 @@ class StateJournal:
         self._last_flush = 0.0
         self._dirty = False
         self._data: Dict[str, Any] = self._load()
+        if path_prefix:
+            self._data["path_prefix"] = path_prefix
+
+    @property
+    def path_prefix(self) -> str:
+        return self._data.get("path_prefix", "")
+
+    @path_prefix.setter
+    def path_prefix(self, val: str) -> None:
+        self._data["path_prefix"] = val
+        self._dirty = True
+
+    def resolve_local_path(self, path_str: str) -> Path:
+        """Resolve archive file path to local disk Path, accounting for stripped root prefix if any."""
+        norm_p = path_str.replace("\\", "/")
+        prefix = self.path_prefix
+        if prefix and norm_p.startswith(prefix):
+            return self.target_dir / Path(norm_p[len(prefix):])
+
+        direct = self.target_dir / Path(norm_p)
+        if direct.exists() or not prefix:
+            if not prefix and not direct.exists():
+                # Auto-detect if root prefix was stripped on disk
+                parts = norm_p.split("/", 1)
+                if len(parts) > 1:
+                    stripped = self.target_dir / Path(parts[1])
+                    if stripped.exists():
+                        self.path_prefix = parts[0] + "/"
+                        return stripped
+            return direct
+        return direct
 
     def _load(self) -> Dict[str, Any]:
         if self.state_file.exists():
@@ -76,7 +107,7 @@ class StateJournal:
         norm_p = path_str.replace("\\", "/")
         entry = self._data["files"].get(norm_p) or self._data["files"].get(path_str)
 
-        local_path = self.target_dir / Path(norm_p)
+        local_path = self.resolve_local_path(norm_p)
         if not local_path.exists():
             return False
 
